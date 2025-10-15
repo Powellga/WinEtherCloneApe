@@ -5,6 +5,8 @@
 [![C#](https://img.shields.io/badge/C%23-239120?style=for-the-badge&logo=c-sharp&logoColor=white)](https://docs.microsoft.com/en-us/dotnet/csharp/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg?style=for-the-badge)](LICENSE)
 
+The files are too large for github - download them here from google drive: https://drive.google.com/file/d/1_75n3IlnkvS99D7Hj4l8Xw6NTwoMI0sL/view?usp=sharing
+
 **A real-time network traffic visualizer for Windows** - bringing the power of Linux's EtherApe to the Windows platform with a modern implementation.
 
 ![WinEtherCloneApe Screenshot](screenshot.png)
