@@ -65,4 +65,5 @@ Run `--demo`, then screenshot with PrintWindow (PW_RENDERFULLCONTENT) from Power
 ## Project Context Log
 
 - 2026-10-30: v2.0.0. Big rewrite of the original single-file v1 (Aug 2025): split into files, stability fixes, threat detection, color palette, Zenmap and Where is? right-click menu, World Map, tooltips, adapter auto-select. The README's old "files too large, download from Google Drive" note was dropped: the repo source was complete (the Drive file was the built program).
+- 2026-10-30: GitHub release v2.0.0 published with WinEtherCloneApe-2.0.0-win-x64.zip (framework-dependent publish output): https://github.com/Powellga/WinEtherCloneApe/releases/tag/v2.0.0
 - abuse.ch SSLBL IP list stopped updating in Jan 2025 (comments only), so it was removed from the feeds.
