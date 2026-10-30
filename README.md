@@ -72,16 +72,19 @@ With **Online lookups** ticked, internet addresses are sent to [ip-api.com](http
 
 ## Installation
 
-### Prerequisites
-- Windows 10/11 (64-bit)
-- [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0)
-- [Npcap](https://npcap.com/) (tick "WinPcap API-compatible Mode" when installing)
-- [Nmap](https://nmap.org/download) with Zenmap, for the Zenmap menu
-- Microsoft Edge WebView2 Runtime (built into Windows 11), for the maps
-- Administrator rights (the app asks for them when it starts)
+Download from the [Releases](https://github.com/Powellga/WinEtherCloneApe/releases) page. Both downloads include .NET, so nothing else from Microsoft needs installing.
+
+- **`WinEtherCloneApe-x.y.z-Setup.exe`** (recommended) - installs for the current user without an admin prompt (or for all users if you choose), adds Start Menu and optional desktop shortcuts, installs WebView2 for the maps if it is missing, checks for Npcap and offers its download page, and adds an uninstaller to Apps & features.
+- **`WinEtherCloneApe-x.y.z-portable.exe`** - one file, no install. Put it anywhere and run it.
+
+### You also need
+- Windows 10 (1809 or later) or Windows 11, 64-bit
+- [Npcap](https://npcap.com/#download) - the free capture driver. Install it once (keep "WinPcap API-compatible Mode" ticked). Its license does not allow bundling it, so the installer links to it instead.
+- [Nmap](https://nmap.org/download#windows) with Zenmap - optional, for the Zenmap menu
+- Administrator rights - the app asks for them when it starts
 
 ### Run
-Download the latest zip from the [Releases](https://github.com/Powellga/WinEtherCloneApe/releases) page, unzip it, and run `WinEtherCloneApe.exe`. Pick your network adapter (the internet-facing one is chosen for you) and press **Start Capture**.
+Start **WinEtherCloneApe** from the Start Menu. The internet-facing adapter is picked for you; press **Start Capture**.
 
 ## Building from Source
 
@@ -92,6 +95,13 @@ dotnet build -c Release
 ```
 
 Or open `WinEtherCloneApe.sln` in Visual Studio 2022.
+
+To build the release files (portable exe and installer) into `artifacts\`:
+
+```powershell
+winget install JRSoftware.InnoSetup --scope user   # once
+.\build-release.ps1
+```
 
 To try the display without capturing (no admin needed when started through `dotnet`):
 

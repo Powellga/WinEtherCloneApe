@@ -23,8 +23,16 @@ bin\Release\net8.0-windows\WinEtherCloneApe.exe
 
 Only the .NET 9 SDK is installed; it builds the net8.0-windows target fine. Desktop runtimes 8 and 9 are installed.
 
-Installed copy: `%LOCALAPPDATA%\Programs\WinEtherCloneApe\WinEtherCloneApe.exe`, Start Menu shortcut "WinEtherCloneApe". Re-publish there after changes:
-`dotnet publish WinEtherCloneApe.csproj -c Release -o "$env:LOCALAPPDATA\Programs\WinEtherCloneApe"` (name the .csproj; publishing the .sln with -o warns). GitHub releases get a zip of that folder.
+## Releasing
+
+1. Bump `<Version>` in WinEtherCloneApe.csproj.
+2. `.\build-release.ps1` creates `artifacts\WinEtherCloneApe-<ver>-portable.exe` (self-contained single file, ~69 MB) and `artifacts\WinEtherCloneApe-<ver>-Setup.exe` (Inno Setup, ~66 MB). Inno Setup 6 is installed per-user at `%LOCALAPPDATA%\Programs\Inno Setup 6`. The script downloads the WebView2 bootstrapper into `installer\redist` (gitignored).
+3. Install on this PC: `artifacts\...-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /CURRENTUSER` (per-user, no UAC; upgrades in place). Installed to `%LOCALAPPDATA%\Programs\WinEtherCloneApe`, Start Menu shortcut "WinEtherCloneApe", uninstaller in Apps & features.
+4. `gh release create v<ver>` with both files. Creating a release needs Gregg's approval in the permission prompt.
+
+Installer details (`installer\WinEtherCloneApe.iss`): per-user by default (PrivilegesRequired=lowest, dialog to choose all users), installs WebView2 if missing, cannot bundle Npcap (license) so it shows an info page and offers npcap.com when Npcap is missing, optional Nmap download link, uninstall removes caches but keeps settings.json and threats.log.
+
+To test a build without the UAC prompt, publish with `-p:ApplicationManifest=<copy of app.manifest set to asInvoker>`. On this PC Npcap allows non-admin capture, so live capture works in that test build. Buttons can be pressed safely with UI Automation InvokePattern (no mouse movement).
 
 Do NOT test the GUI by moving the mouse (SetCursorPos/mouse_event): Windows often refuses to bring the app to the front, and the click lands in whatever window is on top. On 2026-10-30 a right-click pasted text into Gregg's open terminal. Screenshots via PrintWindow are safe.
 
@@ -66,4 +74,5 @@ Run `--demo`, then screenshot with PrintWindow (PW_RENDERFULLCONTENT) from Power
 
 - 2026-10-30: v2.0.0. Big rewrite of the original single-file v1 (Aug 2025): split into files, stability fixes, threat detection, color palette, Zenmap and Where is? right-click menu, World Map, tooltips, adapter auto-select. The README's old "files too large, download from Google Drive" note was dropped: the repo source was complete (the Drive file was the built program).
 - 2026-10-30: GitHub release v2.0.0 published with WinEtherCloneApe-2.0.0-win-x64.zip (framework-dependent publish output): https://github.com/Powellga/WinEtherCloneApe/releases/tag/v2.0.0
+- 2026-10-30: v2.0.1 - app icon (app.ico, generated), single-file self-contained build, Inno Setup installer, multicast label fix. Verified: single exe live-captured 60 hosts; silent install, uninstall and reinstall all pass. README screenshot must stay the demo one (a live capture shows Gregg's real hosts, PC name and IPs in a public repo).
 - abuse.ch SSLBL IP list stopped updating in Jan 2025 (comments only), so it was removed from the feeds.

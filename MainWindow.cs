@@ -84,6 +84,9 @@ namespace WinEtherCloneApe
             updateTimer.Tick += UpdateVisualization;
         }
 
+        public static readonly ImageSource AppIcon =
+            System.Windows.Media.Imaging.BitmapFrame.Create(new Uri("pack://application:,,,/app.ico"));
+
         private static HttpClient CreateHttpClient()
         {
             var client = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
@@ -100,6 +103,7 @@ namespace WinEtherCloneApe
             Height = 900;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             Background = new SolidColorBrush(Color.FromRgb(20, 20, 30));
+            Icon = AppIcon;
 
             var mainGrid = new Grid();
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -918,7 +922,8 @@ namespace WinEtherCloneApe
         {
             string text;
             if (node.IsThisPc) text = $"This PC ({node.IP})";
-            else if (node.IsBroadcast) text = IpUtil.WellKnownName(node.IP) is { } wk ? $"{wk}" : $"{node.IP} (broadcast)";
+            else if (node.IsBroadcast) text = IpUtil.WellKnownName(node.IP)
+                ?? $"{node.IP} ({(IpUtil.IsMulticast(node.Address) ? "multicast" : "broadcast")})";
             else if (node.HostName != null) text = node.HostName;
             else if (node.Provider != null) text = $"{node.Provider.Name} {node.IP}";
             else text = node.IP;

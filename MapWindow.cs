@@ -32,6 +32,7 @@ namespace WinEtherCloneApe
             Width = 1100;
             Height = 720;
             WindowStartupLocation = WindowStartupLocation.CenterOwner;
+            Icon = MainWindow.AppIcon;
             Background = new SolidColorBrush(Color.FromRgb(10, 10, 20));
             Content = web;
             Loaded += async (_, _) => await ShowMapAsync(home, points);
