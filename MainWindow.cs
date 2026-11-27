@@ -34,7 +34,8 @@ namespace WinEtherCloneApe
 
         /// <summary>The few facts the visualizer needs from each packet, captured on the capture thread.</summary>
         private readonly record struct PacketInfo(IPAddress Source, IPAddress Destination, string Protocol,
-            int Size, int SourcePort, int DestinationPort, DateTime Time, bool BroadcastFrame = false);
+            int Size, int SourcePort, int DestinationPort, DateTime Time, bool BroadcastFrame = false,
+            bool TcpSyn = false, DnsInfo? Dns = null);
 
         private Canvas networkCanvas = null!;
         private ComboBox deviceCombo = null!;
@@ -76,7 +77,14 @@ namespace WinEtherCloneApe
         private int queuedPackets;
         private readonly Dictionary<string, NetworkNode> nodes = new();
         private readonly Dictionary<string, NetworkEdge> edges = new();
-        private readonly Dictionary<string, (DateTime Time, string Name, ThreatMatch Match)> threatsSeen = new();
+        private readonly ThreatMonitor threatMonitor;
+        private readonly ConcurrentDictionary<string, byte> sightingsRegistered = new();
+        private readonly ConcurrentQueue<(IPAddress Address, DateTime Time)> newSightings = new();
+        private long droppedPackets;
+        private ThreatReportWindow? threatReportWindow;
+        private DateTime lastAlertSound = DateTime.MinValue;
+        private TextBlock checkedText = null!;
+        private readonly DispatcherTimer feedRefreshTimer = new() { Interval = TimeSpan.FromHours(1) };
         private readonly Dictionary<Color, SolidColorBrush> brushCache = new();
         private readonly DispatcherTimer updateTimer;
         private int nextNodeOrder;
@@ -97,6 +105,9 @@ namespace WinEtherCloneApe
             this.demoOpenMap = demoOpenMap;
             this.captureHost = captureHost;
             ipInfo = new IpInfoService(Http) { Enabled = settings.OnlineLookups };
+            threatMonitor = new ThreatMonitor(threatIntel);
+            threatMonitor.HostThreatFound += OnHostThreatFound;
+            threatMonitor.DnsThreatFound += OnDnsThreatFound;
 
             InitializeComponent();
 
@@ -337,6 +348,41 @@ namespace WinEtherCloneApe
             };
             panel.Children.Add(feedStatusText);
 
+            checkedText = new TextBlock
+            {
+                Text = "Checked this session:\n0 addresses",
+                Foreground = Brushes.LightGray,
+                FontSize = 11,
+                Margin = new Thickness(0, 8, 0, 0),
+                TextWrapping = TextWrapping.Wrap
+            };
+            panel.Children.Add(checkedText);
+
+            var reportButton = new Button
+            {
+                Content = "Threat report",
+                Margin = new Thickness(0, 8, 0, 0),
+                Padding = new Thickness(6, 3, 6, 3),
+                Background = new SolidColorBrush(Color.FromRgb(120, 20, 40)),
+                Foreground = Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Left
+            };
+            reportButton.Click += (_, _) => ShowThreatList();
+            panel.Children.Add(reportButton);
+
+            var soundCheck = new CheckBox
+            {
+                Content = "Alert sound",
+                IsChecked = settings.ThreatSound,
+                Foreground = Brushes.LightGray,
+                FontSize = 11,
+                Margin = new Thickness(0, 6, 0, 0),
+                ToolTip = "Play a warning sound and flash the taskbar when a new threat is found"
+            };
+            soundCheck.Checked += (_, _) => { settings.ThreatSound = true; settings.Save(); };
+            soundCheck.Unchecked += (_, _) => { settings.ThreatSound = false; settings.Save(); };
+            panel.Children.Add(soundCheck);
+
             panel.Children.Add(new TextBlock
             {
                 Text = "Inner ring: your network\nOuter ring: the internet\n\nHover a host for details.\nRight-click for Zenmap,\nWhere is?, browser, SSH,\npacket capture and more.\n\nScroll wheel or pinch: zoom\nDrag: move around\nDouble-click: reset view",
@@ -555,6 +601,10 @@ namespace WinEtherCloneApe
 
             threatIntel.Updated += () => Dispatcher.BeginInvoke(OnThreatFeedsUpdated);
             _ = threatIntel.InitializeAsync(Http);
+
+            // Lists are re-downloaded when older than 12 hours; checking hourly keeps long sessions current
+            feedRefreshTimer.Tick += (_, _) => _ = threatIntel.RefreshAsync(Http);
+            feedRefreshTimer.Start();
             tailscale.AssumeTailnet = demoMode;
             if (!demoMode) tailscale.RefreshInBackground();
 
@@ -716,10 +766,29 @@ namespace WinEtherCloneApe
 
         private void Enqueue(PacketInfo info)
         {
-            if (Interlocked.Increment(ref queuedPackets) <= MaxQueuedPackets)
+            // Every internet address is registered for threat checking before anything can be dropped,
+            // so even packets the display skips under heavy load are still checked
+            RegisterSighting(info.Source, info.Time);
+            RegisterSighting(info.Destination, info.Time);
+
+            // DNS packets always go through: they carry the names that domain lists are checked against
+            if (Interlocked.Increment(ref queuedPackets) <= MaxQueuedPackets || info.Dns != null)
+            {
                 packetQueue.Enqueue(info);
+            }
             else
+            {
                 Interlocked.Decrement(ref queuedPackets); // UI is falling behind - drop rather than grow forever
+                Interlocked.Increment(ref droppedPackets);
+            }
+        }
+
+        private void RegisterSighting(IPAddress address, DateTime time)
+        {
+            if (!ThreatIntel.IsCheckable(address)) return;
+            if (sightingsRegistered.Count > 2_000_000) sightingsRegistered.Clear();
+            if (sightingsRegistered.TryAdd(IpUtil.Normalize(address), 0))
+                newSightings.Enqueue((address, time));
         }
 
         private static PacketInfo? ExtractPacketInfo(Packet packet, int size)
@@ -733,18 +802,22 @@ namespace WinEtherCloneApe
             {
                 string protocol = "Other";
                 int sourcePort = 0, destPort = 0;
+                bool tcpSyn = false;
+                DnsInfo? dns = null;
 
                 if (packet.Extract<TcpPacket>() is { } tcp)
                 {
                     protocol = "TCP";
                     sourcePort = tcp.SourcePort;
                     destPort = tcp.DestinationPort;
+                    tcpSyn = tcp.Synchronize && !tcp.Acknowledgment; // the first packet of a new connection
                 }
                 else if (packet.Extract<UdpPacket>() is { } udp)
                 {
                     protocol = "UDP";
                     sourcePort = udp.SourcePort;
                     destPort = udp.DestinationPort;
+                    if (sourcePort == 53 || destPort == 53) dns = DnsParser.TryParse(udp.PayloadData);
                 }
                 else if (packet.Extract<IcmpV4Packet>() != null || packet.Extract<IcmpV6Packet>() != null)
                 {
@@ -752,7 +825,7 @@ namespace WinEtherCloneApe
                 }
 
                 return new PacketInfo(ipPacket.SourceAddress, ipPacket.DestinationAddress, protocol,
-                    size, sourcePort, destPort, DateTime.Now, broadcastFrame);
+                    size, sourcePort, destPort, DateTime.Now, broadcastFrame, tcpSyn, dns);
             }
 
             // ARP requests are broadcasts; draw them to the broadcast node
@@ -772,6 +845,11 @@ namespace WinEtherCloneApe
 
         private void ApplyPacket(PacketInfo p)
         {
+            // The session threat record: stats for every internet address, and every DNS name checked
+            threatMonitor.ObservePacket(p.Source, p.Destination, p.Protocol, p.Size, p.SourcePort, p.DestinationPort, p.TcpSyn, p.Time);
+            if (p.Dns != null)
+                threatMonitor.ObserveDns(p.Dns, p.Dns.IsResponse ? p.Destination : p.Source, p.Time);
+
             var source = GetOrCreateNode(p.Source, p.Time);
             var dest = GetOrCreateNode(p.Destination, p.Time, p.BroadcastFrame);
             bool isBroadcast = source.IsBroadcast || dest.IsBroadcast;
@@ -849,12 +927,8 @@ namespace WinEtherCloneApe
             {
                 node.Tailscale = tailscale.Identify(address, ip, null);
                 dnsResolver.Request(ip);
-                if (!node.IsLocal)
-                {
-                    node.Threat = threatIntel.Check(address);
-                    if (node.Threat != null) RecordThreat(node);
-                    ipInfo.Request(ip);
-                }
+                node.Threat = threatMonitor.Ensure(address, now)?.Threat;
+                if (!node.IsLocal) ipInfo.Request(ip);
             }
 
             CreateVisuals(node);
@@ -927,6 +1001,7 @@ namespace WinEtherCloneApe
                     node.HostName = host;
                     if (!node.IsLocal && node.Provider == null && host != null)
                         node.Provider = NodePalette.MatchHost(host);
+                    threatMonitor.ObserveHostName(node.IP, host, DateTime.Now);
                 }
 
                 if (!node.IsLocal && node.Geo == null && ipInfo.TryGet(node.IP, out var geo))
@@ -936,6 +1011,9 @@ namespace WinEtherCloneApe
 
                 // Picks up device names after each "tailscale status" refresh
                 node.Tailscale = tailscale.Identify(node.Address, node.IP, node.HostName);
+
+                // Threats can also be found later: by domain name, DNS answers or a list update
+                node.Threat = threatMonitor.Get(node.IP)?.Threat;
             }
         }
 
@@ -946,33 +1024,60 @@ namespace WinEtherCloneApe
                 node.Provider = NodePalette.MatchAsn(geo.AsNumber) ?? NodePalette.MatchOrg(geo.Org, geo.Isp, geo.AsName);
         }
 
-        private void RecordThreat(NetworkNode node)
+        private void OnHostThreatFound(ObservedHost host)
         {
-            if (node.Threat == null || threatsSeen.ContainsKey(node.IP)) return;
+            if (nodes.TryGetValue(host.Ip, out var node)) node.Threat = host.Threat;
 
-            threatsSeen[node.IP] = (DateTime.Now, node.HostName ?? node.IP, node.Threat);
+            // The details (devices, ports) fill in as traffic arrives; log once the first packet has been counted
+            Dispatcher.BeginInvoke(() =>
+            {
+                WriteThreatLog("ADDRESS", host.Ip, host.HostName ?? string.Join(",", host.DnsNames), ThreatMonitor.Describe(host));
+                Alert($"⚠ Threat: {host.Ip} ({host.Threat!.Summary})" +
+                      (host.LocalDevices.Count > 0 ? $" talking to {string.Join(", ", host.LocalDevices)}" : ""));
+            }, DispatcherPriority.Background);
+        }
+
+        private void OnDnsThreatFound(DnsThreat threat)
+        {
+            string details = $"{threat.Match.Summary} | looked up by: {string.Join(", ", threat.Devices)}" +
+                             (threat.ResolvedTo.Count > 0 ? $" | resolved to: {string.Join(", ", threat.ResolvedTo)}" : "");
+            WriteThreatLog("DNS", threat.Domain, "", details);
+            Alert($"⚠ Threat: {string.Join(", ", threat.Devices)} looked up {threat.Domain} ({threat.Match.Summary})");
+        }
+
+        private static void WriteThreatLog(string type, string indicator, string name, string details)
+        {
             try
             {
                 Directory.CreateDirectory(AppSettings.DataFolder);
                 File.AppendAllText(Path.Combine(AppSettings.DataFolder, "threats.log"),
-                    $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}\t{node.IP}\t{node.Threat.Summary}{Environment.NewLine}");
+                    $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}\t{type}\t{indicator}\t{name}\t{details}{Environment.NewLine}");
             }
             catch
             {
-                // The on-screen list still has it
+                // The threat report window still has it
             }
+        }
+
+        /// <summary>Status bar message, taskbar flash and (at most every 10 seconds) a warning sound.</summary>
+        private void Alert(string message)
+        {
+            statusText.Text = message;
+            statusText.Foreground = BrushFor(NodePalette.Threat);
+            if (!settings.ThreatSound || (DateTime.Now - lastAlertSound).TotalSeconds < 10) return;
+            lastAlertSound = DateTime.Now;
+            System.Media.SystemSounds.Exclamation.Play();
+            TaskbarFlash.Flash(this);
         }
 
         private void OnThreatFeedsUpdated()
         {
             feedStatusText.Text = threatIntel.Status;
 
-            // Re-check everything already on screen against the fresh lists
-            foreach (var node in nodes.Values.Where(n => !n.IsLocal && !n.IsBroadcast))
-            {
-                node.Threat = threatIntel.Check(node.Address);
-                RecordThreat(node);
-            }
+            // Re-check every address and name seen this session (not just what is on screen) against the fresh lists
+            threatMonitor.RecheckIfListsChanged(DateTime.Now);
+            foreach (var node in nodes.Values)
+                node.Threat = threatMonitor.Get(node.IP)?.Threat;
         }
 
         private void SetOnlineLookups(bool enabled)
@@ -996,6 +1101,11 @@ namespace WinEtherCloneApe
             var now = DateTime.Now;
             tickCount++;
 
+            // Check every newly seen internet address first, including ones from packets the display skipped
+            while (newSightings.TryDequeue(out var sighting))
+                threatMonitor.Ensure(sighting.Address, sighting.Time);
+            threatMonitor.RecheckIfListsChanged(now);
+
             int processed = 0;
             while (processed < 50_000 && packetQueue.TryDequeue(out var packet))
             {
@@ -1011,13 +1121,22 @@ namespace WinEtherCloneApe
             LayoutAndRender(now);
 
             // Update stats
+            long dropped = Interlocked.Read(ref droppedPackets);
             statsText.Text = $"Packets: {Interlocked.Read(ref totalPackets):N0} | Bytes: {FormatBytes(Interlocked.Read(ref totalBytes))} | " +
-                             $"Hosts: {nodes.Count} | Connections: {edges.Count}";
-            if (threatsSeen.Count > 0)
+                             $"Hosts: {nodes.Count} | Connections: {edges.Count}" +
+                             (dropped > 0 ? $" | Display skipped {dropped:N0} packets (their addresses were still checked)" : "");
+            int threats = threatMonitor.ThreatCount;
+            if (threats > 0)
             {
-                threatText.Text = $"⚠ Threats this session: {threatsSeen.Count}";
+                threatText.Text = $"⚠ Threats this session: {threats} (click for report)";
                 threatText.Foreground = BrushFor(NodePalette.Threat);
                 threatText.FontWeight = FontWeights.Bold;
+            }
+            if (tickCount % 10 == 0)
+            {
+                checkedText.Text = $"Checked this session:\n{threatMonitor.AddressesChecked:N0} addresses " +
+                                   $"({threatMonitor.Ipv6Checked:N0} IPv6)\n{threatMonitor.NamesChecked:N0} DNS names\n" +
+                                   $"Threats: {threats}";
             }
         }
 
@@ -1234,7 +1353,7 @@ namespace WinEtherCloneApe
             return brush;
         }
 
-        private static string FormatBytes(long bytes)
+        public static string FormatBytes(long bytes)
         {
             string[] sizes = { "B", "KB", "MB", "GB", "TB" };
             int order = 0;
@@ -1607,38 +1726,52 @@ namespace WinEtherCloneApe
         private void ShowThreatDetails(NetworkNode node)
         {
             if (node.Threat == null) return;
+            var host = threatMonitor.Get(node.IP);
             var sb = new StringBuilder();
-            sb.AppendLine($"{node.HostName ?? node.IP} ({node.IP}) is on these blocklists:");
+            sb.AppendLine($"{node.HostName ?? node.IP} ({node.IP}) is on these threat lists:");
             sb.AppendLine();
             foreach (var feed in node.Threat.Feeds)
                 sb.AppendLine($"• {feed.Name}: {feed.Description}");
+            if (node.Threat.ViaDomain != null)
+                sb.AppendLine($"  (matched because it is the address of the listed domain {node.Threat.ViaDomain})");
             sb.AppendLine();
-            sb.AppendLine($"Traffic: {FormatBytes(node.BytesTransferred)} in {node.PacketCount:N0} packets, first seen {node.FirstSeen:T}.");
-            if (node.ServicePorts.Count > 0) sb.AppendLine($"Ports: {string.Join(", ", node.ServicePorts)}");
+            if (host != null)
+            {
+                sb.AppendLine($"Your devices that talked to it: {(host.LocalDevices.Count > 0 ? string.Join(", ", host.LocalDevices) : "none seen yet")}");
+                if (host.StartedBy != null)
+                    sb.AppendLine($"Who started the conversation: {host.StartedBy}{(host.StartedByFromSyn ? "" : " (best guess)")}");
+                if (host.Ports.Count > 0) sb.AppendLine($"Ports: {string.Join(", ", host.Ports)}");
+                if (host.DnsNames.Count > 0) sb.AppendLine($"Looked up as: {string.Join(", ", host.DnsNames)}");
+                sb.AppendLine($"Traffic: {FormatBytes(host.Bytes)} in {host.Packets:N0} packets, first seen {host.FirstSeen:T}, last seen {host.LastSeen:T}.");
+                if (host.DetectedLater) sb.AppendLine($"It was only listed after traffic was seen; detected at {host.DetectedAt:T} when the lists updated.");
+            }
             sb.AppendLine();
-            sb.AppendLine("Next steps: right-click > Check reputation online, or Interrogate with Zenmap.");
+            sb.AppendLine("Next steps: check the device(s) above, use right-click > Check reputation online, or open the Threat report.");
             MessageBox.Show(this, sb.ToString(), "Threat details", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
 
         private void ShowThreatList()
         {
-            if (threatsSeen.Count == 0)
+            if (threatReportWindow != null)
             {
-                MessageBox.Show(this, "No blocklisted addresses have been seen this session.", "Threats",
-                    MessageBoxButton.OK, MessageBoxImage.Information);
+                if (threatReportWindow.WindowState == WindowState.Minimized) threatReportWindow.WindowState = WindowState.Normal;
+                threatReportWindow.Activate();
                 return;
             }
 
-            var sb = new StringBuilder();
-            foreach (var (ip, entry) in threatsSeen.OrderBy(t => t.Value.Time))
-            {
-                string name = nodes.TryGetValue(ip, out var n) && n.HostName != null ? $"{n.HostName} " : "";
-                sb.AppendLine($"{entry.Time:T}   {name}{ip}   ({entry.Match.Summary})");
-            }
-            sb.AppendLine();
-            sb.AppendLine($"Full log: {Path.Combine(AppSettings.DataFolder, "threats.log")}");
-            MessageBox.Show(this, sb.ToString(), $"Threats this session ({threatsSeen.Count})",
-                MessageBoxButton.OK, MessageBoxImage.Warning);
+            threatReportWindow = new ThreatReportWindow(threatMonitor, threatIntel, DescribeCaptureState);
+            threatReportWindow.Closed += (_, _) => threatReportWindow = null;
+            threatReportWindow.Show();
+        }
+
+        private string DescribeCaptureState()
+        {
+            string adapter = deviceCombo.SelectedItem is ComboBoxItem { Content: string label } ? label : "no adapter";
+            long dropped = Interlocked.Read(ref droppedPackets);
+            string state = demoMode ? "Demo mode (simulated traffic)."
+                : isCapturing ? $"Capturing on: {adapter}. Only traffic on this adapter is seen."
+                : "Capture is stopped, so nothing new is being checked.";
+            return state + (dropped > 0 ? $" The display skipped {dropped:N0} packets under load; their addresses were still checked." : "");
         }
 
         #endregion
@@ -1663,6 +1796,8 @@ namespace WinEtherCloneApe
             updateTimer.Stop();
             StopCapture(null, null);
             foreach (var window in captureWindows.Values.ToList()) window.Close();
+            threatReportWindow?.Close();
+            feedRefreshTimer.Stop();
             settings.Save();
         }
 
@@ -1698,11 +1833,12 @@ namespace WinEtherCloneApe
             timer.Tick += (_, _) =>
             {
                 var now = DateTime.Now;
-                void Send(IPAddress a, IPAddress b, string proto, int size, int sp, int dp, bool broadcastFrame = false)
+                void Send(IPAddress a, IPAddress b, string proto, int size, int sp, int dp, bool broadcastFrame = false,
+                    bool tcpSyn = false, DnsInfo? dns = null)
                 {
                     Interlocked.Increment(ref totalPackets);
                     Interlocked.Add(ref totalBytes, size);
-                    Enqueue(new PacketInfo(a, b, proto, size, sp, dp, now, broadcastFrame));
+                    Enqueue(new PacketInfo(a, b, proto, size, sp, dp, now, broadcastFrame, tcpSyn, dns));
                 }
 
                 var host = internet[random.Next(internet.Length)];
@@ -1734,6 +1870,22 @@ namespace WinEtherCloneApe
                     Send(tailscaleSelf, peer, "TCP", random.Next(100, 1400), port, 22);
                     Send(peer, tailscaleSelf, "TCP", random.Next(100, 4000), 22, port);
                     if (random.Next(3) == 0) Send(tailscaleSelf, IPAddress.Parse("100.100.100.100"), "UDP", 80, port, 53);
+                }
+                // An IPv6 threat (Spamhaus DROP v6) and a DNS lookup of a listed domain
+                if (random.Next(12) == 0 && threatIntel.SampleListedIpv6() is { } bad6)
+                {
+                    var pc6 = IPAddress.Parse("2001:db8:1::50");
+                    LocalNetwork.AddLocalAddress("2001:db8:1::50");
+                    Send(pc6, IPAddress.Parse(bad6), "TCP", 90, port, 443, tcpSyn: true);
+                    Send(IPAddress.Parse(bad6), pc6, "TCP", 400, 443, port);
+                }
+                if (random.Next(15) == 0 && threatIntel.SampleListedDomain() is { } badDomain)
+                {
+                    var lan1 = lan[0];
+                    var resolved = IPAddress.Parse("203.0.113.66");
+                    Send(lan1, router, "UDP", 80, port, 53, dns: new DnsInfo(badDomain, false, Array.Empty<IPAddress>()));
+                    Send(router, lan1, "UDP", 120, 53, port, dns: new DnsInfo(badDomain, true, new[] { resolved }));
+                    Send(lan1, resolved, "TCP", 90, port, 443, tcpSyn: true);
                 }
                 if (random.Next(10) == 0 && threatIntel.SampleListedIp() is { } bad)
                 {

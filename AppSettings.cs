@@ -13,6 +13,7 @@ namespace WinEtherCloneApe
         public bool OnlineLookups { get; set; } = true;
         public string? SshUser { get; set; }
         public int SshPort { get; set; } = 22;
+        public bool ThreatSound { get; set; } = true;
 
         public static string DataFolder { get; } = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinEtherCloneApe");

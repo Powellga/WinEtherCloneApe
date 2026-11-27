@@ -44,7 +44,10 @@ Do NOT test the GUI by moving the mouse (SetCursorPos/mouse_event): Windows ofte
 - `MainWindow.cs` - UI built in code (no XAML), capture, packet queue, rendering, tooltip, right-click menu, demo traffic
 - `Models.cs` - NetworkNode (with its WPF shapes), NetworkEdge, GeoInfo, NodeCategory
 - `NodePalette.cs` - all colors, top-10 provider definitions (ASNs, host suffixes, org keywords), known public DNS resolvers
-- `ThreatIntel.cs` - blocklist download/cache/merge/binary-search lookup
+- `ThreatIntel.cs` - threat list download/cache/merge; IPv4 (uint) and IPv6 (UInt128) range binary search, domain HashSet with parent-domain walk. `Version` increments on every reload. `RefreshAsync` downloads lists older than 12h (startup plus hourly timer in MainWindow).
+- `ThreatMonitor.cs` - the session threat record (UI thread): an `ObservedHost` for every checkable public address ever seen (stats, local devices, ports, who started it from TCP SYN, DNS names), DNS threats, re-check of everything when `ThreatIntel.Version` changes, CSV export. Never trims threats.
+- `DnsParser.cs` - reads question names and A/AAAA answers from UDP port 53 payloads (compression-safe, never throws)
+- `ThreatReportWindow.cs` - threat report grid plus a "how much was checked" summary; opened from the legend button or the threat counter
 - `LookupServices.cs` - DnsResolverService (reverse DNS, 4s timeout, 8 concurrent) and IpInfoService (ip-api.com batch, 100 IPs per call, every 4.5s)
 - `MapWindow.cs` - Leaflet 1.9.4 map in WebView2, served from a virtual host `https://winetherape.map/`
 - `ExternalTools.cs` - Zenmap launch (`zenmap.exe -t <ip> -p "<profile>"`, auto-starts the scan), browser via explorer.exe (so the browser is not elevated)
@@ -66,9 +69,17 @@ Do NOT test the GUI by moving the mouse (SetCursorPos/mouse_event): Windows ofte
 - Zoom and pan (region "Zoom and pan" in MainWindow): node.Position is the layout (ring) position; `ToScreen()` applies `zoom` and `pan` at draw time in `RenderView()`. It is semantic zoom, not a RenderTransform: positions spread by the zoom factor while dots grow by zoom^0.3 and fonts by zoom^0.25, so crowded labels separate. `LayoutAndRender()` (timer tick) moves nodes along the rings and then calls `RenderView()`; drag/zoom call `RenderView()` only, via `RenderNow()`. Mouse: wheel zooms at the pointer, left-drag pans, double-click resets. Touch: canvas `IsManipulationEnabled` (pinch and pan), and a 650ms press-and-hold timer opens the host menu because manipulation stops touch being promoted to right-click. Keys: + - 0.
 - Timing constants at the top of MainWindow: edges fade after 5s and go at 60s; nodes fade after 60s idle and go at 120s; threat nodes stay 600s.
 
+## Threat detection pipeline
+
+1. Capture thread: `ExtractPacketInfo` sets `TcpSyn` and parses DNS. `Enqueue` calls `RegisterSighting` for both addresses BEFORE the 200k queue cap, so an address is queued for checking even if its packet is dropped. DNS packets bypass the cap. Drops are counted (`droppedPackets`) and shown.
+2. UI tick: drains `newSightings` into `threatMonitor.Ensure` (checks the address), runs `RecheckIfListsChanged`, then `ApplyPacket` feeds `ObservePacket` and `ObserveDns`. Reverse-DNS names go through `ObserveHostName`.
+3. Node colour comes from `threatMonitor.Get(ip).Threat` (refreshed in `ApplyLookupResults`).
+4. A new threat raises `HostThreatFound` or `DnsThreatFound`: threats.log line (TSV: time, ADDRESS or DNS, indicator, name, details), status bar, taskbar flash and sound (setting `ThreatSound`, at most every 10s).
+5. Not checkable on purpose: private, CGNAT, link-local, multicast, reserved and documentation ranges (FireHOL lists bogons). This PC's own public addresses count as "your device".
+
 ## External services (no keys)
 
-- Threat feeds (cached in `%LOCALAPPDATA%\WinEtherCloneApe\threatfeeds`, refreshed after 12h): FireHOL Level 1, Feodo Tracker, Emerging Threats compromised IPs, CINS Army. FireHOL Level 1 includes private bogon ranges, so private/reserved IPs are excluded before lookup.
+- Threat lists (cached in `%LOCALAPPDATA%\WinEtherCloneApe\threatfeeds`, refreshed after 12h): FireHOL Level 1, Feodo Tracker, Emerging Threats compromised IPs, CINS Army, HaGeZi TIF IPs, Spamhaus DROP v6 (JSON lines), HaGeZi TIF domains (wildcard tif.mini-onlydomains), Phishing Army. The abuse.ch URLhaus and ThreatFox host files return 410 Gone (checked 2026-11-27), and HaGeZi's domains/tif.mini.txt path is 404; use the wildcard/ path.
 - ip-api.com: free tier is HTTP only and non-commercial, 15 batch requests/min. Toggle "Online lookups" turns it off.
 - Map tiles: Esri World Dark Gray Base + Reference (no key). CARTO basemaps now need an API key (found 2026-10-30), do not switch back.
 - Threat log: `%LOCALAPPDATA%\WinEtherCloneApe\threats.log`.
@@ -84,4 +95,5 @@ Run `--demo`, then screenshot with PrintWindow (PW_RENDERFULLCONTENT) from Power
 - 2026-10-30: v2.0.1 - app icon (app.ico, generated), single-file self-contained build, Inno Setup installer, multicast label fix. Verified: single exe live-captured 60 hosts; silent install, uninstall and reinstall all pass. README screenshot must stay the demo one (a live capture shows Gregg's real hosts, PC name and IPs in a public repo).
 - 2026-11-27: v2.1.0 - right-click Connect with browser (80 and 443) and SSH, Tailscale category (lavender, dashed ring, names from `tailscale status --json`), per-host packet capture window with .pcap export. Published as GitHub release v2.1.0 (Setup.exe and portable.exe): https://github.com/Powellga/WinEtherCloneApe/releases/tag/v2.1.0. The 2.0.1 release was never published; 2.1.0 replaces it. Verified live: capture window recorded the router's packets, decode pane works, saved .pcap read by capinfos/tshark (77 packets, Ethernet); Tailscale DERP servers, a tunnel endpoint and a tailnet device were classified. Not exercised by clicking: the SSH and browser menu items (the right-click menu cannot be opened without the mouse).
 - 2026-11-27: v2.2.0 - zoom and pan on the main view (mouse wheel, drag, double-click reset, Reset View button, pinch and finger drag on touch screens, press-and-hold for the host menu, + - 0 keys), Details... menu item. Verified: --zoom screenshot shows nodes spread with readable labels, and a real mouse-wheel scroll during the test zoomed around the pointer. Not verified: left-drag pan and touch gestures (no safe way to send them without the real mouse or a touch screen). Published as GitHub release v2.2.0: https://github.com/Powellga/WinEtherCloneApe/releases/tag/v2.2.0. Installed on this PC.
+- 2026-11-27: v2.3.0 - threat detection audit and fixes. Gaps found: IPv6 never checked, lists only refreshed at startup, list updates only re-checked on-screen nodes, dropped packets were never checked, no domain checks, thin report. All fixed (see Threat detection pipeline). Verified in demo: IPv6 threat, DNS lookup of a listed domain (device attributed, resolved address flagged), report window, threats.log details. A real packet to 203.0.113.66 (documentation range) was logged by the installed 2.2.0 copy at 10:46:55; source unknown, harmless, now excluded as a bogon.
 - abuse.ch SSLBL IP list stopped updating in Jan 2025 (comments only), so it was removed from the feeds.

@@ -3,6 +3,43 @@ using System.IO;
 
 namespace WinEtherCloneApe
 {
+    /// <summary>Flashes the app's taskbar button until it is clicked (used for threat alerts).</summary>
+    public static class TaskbarFlash
+    {
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct FLASHWINFO
+        {
+            public uint cbSize;
+            public IntPtr hwnd;
+            public uint dwFlags;
+            public uint uCount;
+            public uint dwTimeout;
+        }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool FlashWindowEx(ref FLASHWINFO info);
+
+        public static void Flash(System.Windows.Window window)
+        {
+            try
+            {
+                var hwnd = new System.Windows.Interop.WindowInteropHelper(window).Handle;
+                if (hwnd == IntPtr.Zero || window.IsActive) return;
+                var info = new FLASHWINFO
+                {
+                    cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<FLASHWINFO>(),
+                    hwnd = hwnd,
+                    dwFlags = 0x3 | 0xC, // FLASHW_ALL | FLASHW_TIMERNOFG
+                };
+                FlashWindowEx(ref info);
+            }
+            catch
+            {
+                // Cosmetic only
+            }
+        }
+    }
+
     /// <summary>
     /// Launches Zenmap and web pages.
     /// </summary>
