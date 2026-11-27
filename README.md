@@ -9,6 +9,12 @@
 
 ![WinEtherCloneApe Screenshot](screenshot.png)
 
+## What's new in 2.2
+
+- **Zoom and move around the map of hosts** - scroll the mouse wheel to zoom in where the pointer is, drag with the left mouse button to move around, double-click an empty spot (or press **Reset View**) to see everything again. On a touch screen, pinch to zoom, drag with a finger, and press and hold a host for its menu. Keyboard: `+`, `-` and `0`.
+- Zooming spreads the hosts apart while their dots and labels stay readable, so a crowded ring opens up instead of just getting bigger. Long host names show in full when zoomed in.
+- **Details...** on the right-click menu shows the hover information in a window (handy on touch screens)
+
 ## What's new in 2.1
 
 - **Packet capture for one host** - right-click a host and choose **Packet capture...** to record every packet to and from it while the main capture runs. A Wireshark-style window lists the packets live (time, source, destination, protocol, length, TCP flags), shows each packet's decoded layers and hex bytes, and saves a standard `.pcap` file or opens it straight in Wireshark. Saved captures go to `C:\Users\<you>\WinEtherCloneApe Captures` (not Documents, which is often synced to OneDrive).
@@ -122,7 +128,7 @@ dotnet bin/Release/net8.0-windows/WinEtherCloneApe.dll --demo
 
 Add `--open-map` to have the World Map open after 20 seconds.
 
-`--capture-host <ip>` starts capturing on the last-used adapter and opens a packet capture for that address straight away.
+`--capture-host <ip>` starts capturing on the last-used adapter and opens a packet capture for that address straight away. `--zoom <factor>` starts zoomed in (for example `--zoom 2.5`).
 
 ### NuGet packages
 - SharpPcap 6.3.1 - packet capture
@@ -153,7 +159,8 @@ AppSettings.cs     Settings in %LOCALAPPDATA%\WinEtherCloneApe\settings.json
 - Only scan hosts you own or have permission to scan - scanning other people's servers with Zenmap can break their terms of service or the law
 - Some addresses have no host name (no reverse DNS record)
 - Packet capture records only while the main capture is running, on the adapter selected there. Traffic inside a Tailscale tunnel is encrypted on the Ethernet/Wi-Fi adapter; pick the Tailscale adapter to capture it unencrypted.
-- Busy networks can still have overlapping labels; hover for the full details
+- Busy networks can still have overlapping labels at the default zoom; zoom in to separate them, or hover for the full details
+- Touch gestures work on Windows touch screens (Surface and touch laptops). This is a Windows desktop app, so it does not run on phones or iPads.
 
 ## License
 

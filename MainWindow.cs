@@ -58,6 +58,19 @@ namespace WinEtherCloneApe
         private readonly bool demoMode;
         private readonly bool demoOpenMap;
 
+        // Zoom and pan of the main view. Zooming spreads node positions apart while dots and
+        // labels grow only a little, so crowded areas open up instead of just getting bigger.
+        private const double MinZoom = 0.4;
+        private const double MaxZoom = 15;
+        private double zoom = 1;
+        private Vector pan;
+        private bool dragging;
+        private Point dragStart;
+        private Vector panAtDragStart;
+        private TextBlock zoomText = null!;
+        private DispatcherTimer? longPressTimer;
+        private Point longPressStart;
+
         private ICaptureDevice? currentDevice;
         private readonly ConcurrentQueue<PacketInfo> packetQueue = new();
         private int queuedPackets;
@@ -75,8 +88,11 @@ namespace WinEtherCloneApe
 
         private readonly string? captureHost;
 
-        public MainWindow(bool demoMode = false, bool demoOpenMap = false, string? captureHost = null)
+        private readonly double startZoom;
+
+        public MainWindow(bool demoMode = false, bool demoOpenMap = false, string? captureHost = null, double startZoom = 1)
         {
+            this.startZoom = startZoom;
             this.demoMode = demoMode;
             this.demoOpenMap = demoOpenMap;
             this.captureHost = captureHost;
@@ -177,15 +193,31 @@ namespace WinEtherCloneApe
             controlPanel.Children.Add(startButton);
             controlPanel.Children.Add(stopButton);
             controlPanel.Children.Add(clearButton);
+            var resetViewButton = MakeButton("Reset View", 95, Color.FromRgb(80, 80, 100));
+            resetViewButton.ToolTip = "Zoom back out to show everything (or double-click an empty spot)";
+            resetViewButton.Click += (_, _) => ResetView();
+
+            zoomText = new TextBlock
+            {
+                Text = "Zoom 100%",
+                Foreground = Brushes.LightGray,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(4, 0, 10, 0)
+            };
+
             controlPanel.Children.Add(mapButton);
+            controlPanel.Children.Add(resetViewButton);
+            controlPanel.Children.Add(zoomText);
             controlPanel.Children.Add(onlineLookupsCheck);
 
             // Network Canvas + legend
             networkCanvas = new Canvas
             {
                 Background = new SolidColorBrush(Color.FromRgb(10, 10, 20)),
-                ClipToBounds = true
+                ClipToBounds = true,
+                IsManipulationEnabled = true
             };
+            HookZoomAndPan();
 
             var canvasBorder = new Border
             {
@@ -307,7 +339,7 @@ namespace WinEtherCloneApe
 
             panel.Children.Add(new TextBlock
             {
-                Text = "Inner ring: your network\nOuter ring: the internet\n\nHover a host for details.\nRight-click for Zenmap,\nWhere is?, browser, SSH,\npacket capture and more.",
+                Text = "Inner ring: your network\nOuter ring: the internet\n\nHover a host for details.\nRight-click for Zenmap,\nWhere is?, browser, SSH,\npacket capture and more.\n\nScroll wheel or pinch: zoom\nDrag: move around\nDouble-click: reset view",
                 Foreground = Brushes.Gray,
                 FontSize = 11,
                 Margin = new Thickness(0, 14, 0, 0),
@@ -321,6 +353,144 @@ namespace WinEtherCloneApe
                 Background = new SolidColorBrush(Color.FromRgb(25, 25, 35))
             };
         }
+
+        #region Zoom and pan
+
+        private void HookZoomAndPan()
+        {
+            // Mouse: wheel zooms around the pointer, left-drag moves, double-click resets
+            networkCanvas.MouseWheel += (_, e) =>
+            {
+                ZoomAt(e.GetPosition(networkCanvas), Math.Pow(1.18, e.Delta / 120.0));
+                e.Handled = true;
+            };
+            networkCanvas.MouseLeftButtonDown += (_, e) =>
+            {
+                if (e.ClickCount == 2)
+                {
+                    ResetView();
+                    return;
+                }
+                dragging = true;
+                dragStart = e.GetPosition(networkCanvas);
+                panAtDragStart = pan;
+                networkCanvas.CaptureMouse();
+                networkCanvas.Cursor = Cursors.SizeAll;
+            };
+            networkCanvas.MouseMove += (_, e) =>
+            {
+                if (!dragging) return;
+                pan = panAtDragStart + (e.GetPosition(networkCanvas) - dragStart);
+                RenderNow();
+            };
+            networkCanvas.MouseLeftButtonUp += (_, _) => EndDrag();
+            networkCanvas.LostMouseCapture += (_, _) => EndDrag();
+
+            // Touch screens: pinch zooms, one or two fingers move, press and hold a host for its menu
+            networkCanvas.ManipulationStarting += (_, e) =>
+            {
+                e.ManipulationContainer = networkCanvas;
+                e.Mode = ManipulationModes.Scale | ManipulationModes.Translate;
+                e.Handled = true;
+            };
+            networkCanvas.ManipulationDelta += (_, e) =>
+            {
+                var delta = e.DeltaManipulation;
+                pan += delta.Translation;
+                double scale = (delta.Scale.X + delta.Scale.Y) / 2;
+                if (Math.Abs(scale - 1) > 0.001) ZoomAt(e.ManipulationOrigin, scale);
+                else RenderNow();
+                if (delta.Translation.Length > 8) CancelLongPress();
+                e.Handled = true;
+            };
+            networkCanvas.ManipulationBoundaryFeedback += (_, e) => e.Handled = true;
+
+            networkCanvas.PreviewTouchDown += (_, e) =>
+            {
+                CancelLongPress();
+                if (e.OriginalSource is not FrameworkElement { Tag: NetworkNode node } element) return;
+                longPressStart = e.GetTouchPoint(networkCanvas).Position;
+                longPressTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(650) };
+                longPressTimer.Tick += (_, _) =>
+                {
+                    CancelLongPress();
+                    var menu = BuildContextMenu(node);
+                    menu.PlacementTarget = element;
+                    menu.IsOpen = true;
+                };
+                longPressTimer.Start();
+            };
+            networkCanvas.PreviewTouchMove += (_, e) =>
+            {
+                if (longPressTimer != null && (e.GetTouchPoint(networkCanvas).Position - longPressStart).Length > 12)
+                    CancelLongPress();
+            };
+            networkCanvas.PreviewTouchUp += (_, _) => CancelLongPress();
+
+            // Keyboard: + and - zoom on the center, 0 resets
+            PreviewKeyDown += (_, e) =>
+            {
+                if (e.OriginalSource is TextBox or ComboBox) return;
+                var center = new Point(networkCanvas.ActualWidth / 2, networkCanvas.ActualHeight / 2);
+                switch (e.Key)
+                {
+                    case Key.OemPlus or Key.Add: ZoomAt(center, 1.25); e.Handled = true; break;
+                    case Key.OemMinus or Key.Subtract: ZoomAt(center, 1 / 1.25); e.Handled = true; break;
+                    case Key.D0 or Key.NumPad0 or Key.Home: ResetView(); e.Handled = true; break;
+                }
+            };
+        }
+
+        private void EndDrag()
+        {
+            if (!dragging) return;
+            dragging = false;
+            networkCanvas.ReleaseMouseCapture();
+            networkCanvas.Cursor = null;
+        }
+
+        private void CancelLongPress()
+        {
+            longPressTimer?.Stop();
+            longPressTimer = null;
+        }
+
+        /// <summary>Zooms by a factor, keeping the spot under the pointer (or fingers) still.</summary>
+        private void ZoomAt(Point screen, double factor)
+        {
+            double newZoom = Math.Clamp(zoom * factor, MinZoom, MaxZoom);
+            if (Math.Abs(newZoom - zoom) < 1e-9) return;
+
+            var c = ViewCenter;
+            double worldX = c.X + (screen.X - c.X - pan.X) / zoom;
+            double worldY = c.Y + (screen.Y - c.Y - pan.Y) / zoom;
+            zoom = newZoom;
+            pan = new Vector(screen.X - c.X - (worldX - c.X) * zoom, screen.Y - c.Y - (worldY - c.Y) * zoom);
+            zoomText.Text = $"Zoom {zoom * 100:0}%";
+            RenderNow();
+        }
+
+        private void ResetView()
+        {
+            zoom = 1;
+            pan = new Vector();
+            zoomText.Text = "Zoom 100%";
+            RenderNow();
+        }
+
+        private Point ViewCenter => new(networkCanvas.ActualWidth / 2, networkCanvas.ActualHeight / 2);
+
+        /// <summary>Where a layout position appears on screen after zoom and pan.</summary>
+        private Point ToScreen(Point world)
+        {
+            var c = ViewCenter;
+            return new Point(c.X + (world.X - c.X) * zoom + pan.X, c.Y + (world.Y - c.Y) * zoom + pan.Y);
+        }
+
+        /// <summary>Redraws straight away so dragging and zooming feel immediate.</summary>
+        private void RenderNow() => RenderView(DateTime.Now);
+
+        #endregion
 
         private static void AddLegendHeader(Panel panel, string text)
         {
@@ -390,6 +560,8 @@ namespace WinEtherCloneApe
 
             updateTimer.Start();
             if (demoMode) StartDemo();
+            if (Math.Abs(startZoom - 1) > 0.01)
+                Dispatcher.BeginInvoke(() => ZoomAt(ViewCenter, startZoom), DispatcherPriority.Loaded);
 
             // --capture-host <ip>: start capturing on the chosen adapter and open a packet capture for that address
             if (!demoMode && captureHost != null && IPAddress.TryParse(captureHost, out var hostAddress) && startButton.IsEnabled)
@@ -873,6 +1045,15 @@ namespace WinEtherCloneApe
             PlaceRing(inner, center, inner.Count == 1 ? 0 : innerRadius, -Math.PI / 2);
             PlaceRing(outer, center, outerRadius, -Math.PI / 2 + Math.PI / Math.Max(1, outer.Count));
 
+            RenderView(now);
+        }
+
+        /// <summary>Draws lines and nodes at their zoomed and panned screen positions.</summary>
+        private void RenderView(DateTime now)
+        {
+            if (networkCanvas.ActualWidth < 100 || networkCanvas.ActualHeight < 100) return;
+            var center = ViewCenter;
+
             foreach (var edge in edges.Values)
             {
                 if (!nodes.TryGetValue(edge.Source, out var a) || !nodes.TryGetValue(edge.Destination, out var b)) continue;
@@ -882,11 +1063,13 @@ namespace WinEtherCloneApe
                     ? 0.9
                     : Math.Max(0.06, 0.9 * (1 - (idle - EdgeFullSeconds) / (EdgeRemoveSeconds - EdgeFullSeconds)));
 
+                var pa = ToScreen(a.Position);
+                var pb = ToScreen(b.Position);
                 var line = edge.Line;
-                line.X1 = a.Position.X;
-                line.Y1 = a.Position.Y;
-                line.X2 = b.Position.X;
-                line.Y2 = b.Position.Y;
+                line.X1 = pa.X;
+                line.Y1 = pa.Y;
+                line.X2 = pb.X;
+                line.Y2 = pb.Y;
                 line.Stroke = BrushFor(edge.Color);
                 line.StrokeThickness = Math.Clamp(1 + Math.Log10(1 + edge.BytesTransferred / 1000.0), 1, 7);
                 line.Opacity = opacity;
@@ -930,9 +1113,12 @@ namespace WinEtherCloneApe
                 ? 1
                 : Math.Max(0.15, 1 - (idle - NodeFadeStartSeconds) / (removeAt - NodeFadeStartSeconds));
 
-            // Size grows with traffic on a log scale: about 14px for a few KB up to 48px for a GB
-            double size = 12 + Math.Clamp(6 * Math.Log10(1 + node.BytesTransferred / 1000.0), 0, 36);
-            double x = node.Position.X, y = node.Position.Y;
+            // Size grows with traffic on a log scale: about 14px for a few KB up to 48px for a GB.
+            // Zooming grows dots only gently, so zooming in separates crowded nodes.
+            double size = (12 + Math.Clamp(6 * Math.Log10(1 + node.BytesTransferred / 1000.0), 0, 36))
+                          * Math.Clamp(Math.Pow(zoom, 0.3), 0.7, 1.8);
+            var screen = ToScreen(node.Position);
+            double x = screen.X, y = screen.Y;
 
             var shape = node.Shape;
             shape.Width = size;
@@ -976,14 +1162,17 @@ namespace WinEtherCloneApe
             }
 
             var label = node.Label;
-            string text = LabelText(node);
+            string text = LabelText(node, zoom >= 2 ? 64 : 36);
             if (label.Text != text) label.Text = text;
+            double fontSize = Math.Round(Math.Clamp(10 * Math.Pow(zoom, 0.25), 9, 15), 1);
+            if (Math.Abs(label.FontSize - fontSize) > 0.05) label.FontSize = fontSize;
             label.Foreground = node.Threat != null ? BrushFor(NodePalette.Threat) : Brushes.White;
             label.Opacity = opacity;
 
-            // Put the label just outside the node, pointing away from the center
-            double angle = Math.Atan2(y - center.Y, x - center.X);
-            if (Math.Abs(x - center.X) < 1 && Math.Abs(y - center.Y) < 1) angle = Math.PI / 2;
+            // Put the label just outside the node, pointing away from the ring center
+            double wx = node.Position.X, wy = node.Position.Y;
+            double angle = Math.Atan2(wy - center.Y, wx - center.X);
+            if (Math.Abs(wx - center.X) < 1 && Math.Abs(wy - center.Y) < 1) angle = Math.PI / 2;
             double offset = size / 2 + 4;
             double lx = x + Math.Cos(angle) * offset;
             double ly = y + Math.Sin(angle) * offset - label.ActualHeight / 2;
@@ -993,7 +1182,7 @@ namespace WinEtherCloneApe
             Canvas.SetTop(label, ly);
         }
 
-        private static string LabelText(NetworkNode node)
+        private static string LabelText(NetworkNode node, int maxLength = 36)
         {
             string text;
             var ts = node.Tailscale;
@@ -1009,7 +1198,7 @@ namespace WinEtherCloneApe
             else text = node.IP;
 
             if (node.Threat != null) text = "⚠ " + text;
-            return text.Length > 36 ? "…" + text[^35..] : text;
+            return text.Length > maxLength ? "…" + text[^(maxLength - 1)..] : text;
         }
 
         private void RemoveExpired(DateTime now)
@@ -1145,6 +1334,13 @@ namespace WinEtherCloneApe
             string title = node.HostName != null ? $"{node.HostName}  ({node.IP})" : LabelText(node);
             menu.Items.Add(new MenuItem { Header = title, IsEnabled = false, FontWeight = FontWeights.Bold });
             menu.Items.Add(new Separator());
+
+            // The hover tooltip as a window, for touch screens where there is no hover
+            var detailsItem = new MenuItem { Header = "Details..." };
+            detailsItem.Click += (_, _) => MessageBox.Show(this, BuildTooltipText(node).Replace(
+                "Right-click for Zenmap, connect, packet capture and more", "").TrimEnd(),
+                node.HostName ?? node.IP, MessageBoxButton.OK, MessageBoxImage.Information);
+            menu.Items.Add(detailsItem);
 
             var zenmap = new MenuItem { Header = "Interrogate with Zenmap", IsEnabled = !node.IsBroadcast };
             foreach (string profile in ExternalTools.ZenmapProfiles)

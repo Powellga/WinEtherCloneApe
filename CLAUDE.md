@@ -18,6 +18,7 @@ dotnet build -c Release
 # Demo mode: simulated traffic, no adapter or admin needed when started via dotnet (skips the UAC manifest)
 dotnet bin\Release\net8.0-windows\WinEtherCloneApe.dll --demo            # add --open-map to auto-open the World Map after 20s
 # --capture-host <ip>: starts live capture on the last-used adapter and opens a packet capture for that IP (used to test packet capture without the right-click menu)
+# --zoom <factor>: starts zoomed in. Use it to test zoom: posted WM_MOUSEWHEEL and WM_KEYDOWN messages do not reach WPF (wheel goes to the element under the real pointer, keys need focus)
 # Real use: the exe requires admin (app.manifest requireAdministrator)
 bin\Release\net8.0-windows\WinEtherCloneApe.exe
 ```
@@ -62,6 +63,7 @@ Do NOT test the GUI by moving the mouse (SetCursorPos/mouse_event): Windows ofte
 - Broadcast detection: subnet broadcast addresses, 255.255.255.255, multicast, AND Ethernet destination ff:ff:ff:ff:ff:ff. ARP requests are drawn to the 255.255.255.255 node. Broadcast lines are grey.
 - DNS server detection: the endpoint using port 53/853, plus adapter DNS servers and known public resolvers.
 - Provider detection: ASN from ip-api, then reverse DNS host suffix, then org name keywords.
+- Zoom and pan (region "Zoom and pan" in MainWindow): node.Position is the layout (ring) position; `ToScreen()` applies `zoom` and `pan` at draw time in `RenderView()`. It is semantic zoom, not a RenderTransform: positions spread by the zoom factor while dots grow by zoom^0.3 and fonts by zoom^0.25, so crowded labels separate. `LayoutAndRender()` (timer tick) moves nodes along the rings and then calls `RenderView()`; drag/zoom call `RenderView()` only, via `RenderNow()`. Mouse: wheel zooms at the pointer, left-drag pans, double-click resets. Touch: canvas `IsManipulationEnabled` (pinch and pan), and a 650ms press-and-hold timer opens the host menu because manipulation stops touch being promoted to right-click. Keys: + - 0.
 - Timing constants at the top of MainWindow: edges fade after 5s and go at 60s; nodes fade after 60s idle and go at 120s; threat nodes stay 600s.
 
 ## External services (no keys)
@@ -81,4 +83,5 @@ Run `--demo`, then screenshot with PrintWindow (PW_RENDERFULLCONTENT) from Power
 - 2026-10-30: GitHub release v2.0.0 published with WinEtherCloneApe-2.0.0-win-x64.zip (framework-dependent publish output): https://github.com/Powellga/WinEtherCloneApe/releases/tag/v2.0.0
 - 2026-10-30: v2.0.1 - app icon (app.ico, generated), single-file self-contained build, Inno Setup installer, multicast label fix. Verified: single exe live-captured 60 hosts; silent install, uninstall and reinstall all pass. README screenshot must stay the demo one (a live capture shows Gregg's real hosts, PC name and IPs in a public repo).
 - 2026-11-27: v2.1.0 - right-click Connect with browser (80 and 443) and SSH, Tailscale category (lavender, dashed ring, names from `tailscale status --json`), per-host packet capture window with .pcap export. Published as GitHub release v2.1.0 (Setup.exe and portable.exe): https://github.com/Powellga/WinEtherCloneApe/releases/tag/v2.1.0. The 2.0.1 release was never published; 2.1.0 replaces it. Verified live: capture window recorded the router's packets, decode pane works, saved .pcap read by capinfos/tshark (77 packets, Ethernet); Tailscale DERP servers, a tunnel endpoint and a tailnet device were classified. Not exercised by clicking: the SSH and browser menu items (the right-click menu cannot be opened without the mouse).
+- 2026-11-27: v2.2.0 - zoom and pan on the main view (mouse wheel, drag, double-click reset, Reset View button, pinch and finger drag on touch screens, press-and-hold for the host menu, + - 0 keys), Details... menu item. Verified: --zoom screenshot shows nodes spread with readable labels, and a real mouse-wheel scroll during the test zoomed around the pointer. Not verified: left-drag pan and touch gestures (no safe way to send them without the real mouse or a touch screen).
 - abuse.ch SSLBL IP list stopped updating in Jan 2025 (comments only), so it was removed from the feeds.
