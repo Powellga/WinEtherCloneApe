@@ -11,6 +11,8 @@ namespace WinEtherCloneApe
         public string? LastAdapterName { get; set; }
         public string? ZenmapPath { get; set; }
         public bool OnlineLookups { get; set; } = true;
+        public string? SshUser { get; set; }
+        public int SshPort { get; set; } = 22;
 
         public static string DataFolder { get; } = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinEtherCloneApe");

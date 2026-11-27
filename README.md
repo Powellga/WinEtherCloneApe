@@ -9,6 +9,13 @@
 
 ![WinEtherCloneApe Screenshot](screenshot.png)
 
+## What's new in 2.1
+
+- **Packet capture for one host** - right-click a host and choose **Packet capture...** to record every packet to and from it while the main capture runs. A Wireshark-style window lists the packets live (time, source, destination, protocol, length, TCP flags), shows each packet's decoded layers and hex bytes, and saves a standard `.pcap` file or opens it straight in Wireshark. Saved captures go to `C:\Users\<you>\WinEtherCloneApe Captures` (not Documents, which is often synced to OneDrive).
+- **Connect with browser** - opens `http://<ip>/` (port 80) or `https://<ip>/` (port 443), handy for routers, printers and cameras
+- **Connect with SSH** - asks for the user name and port (remembered for next time) and opens the session in Windows Terminal, using the SSH client built into Windows
+- **Tailscale** - devices on your tailnet are lavender with a dashed ring. When the Tailscale app is installed, each one is labelled with its tailnet name, and the tooltip shows its OS and whether it is online. MagicDNS (100.100.100.100) and the public endpoints of your Tailscale tunnels are recognized too.
+
 ## What's new in 2.0
 
 - **Threat detection** - every internet address is checked against free public blocklists. Threats are the only red hosts, with a pulsing ring, a counter in the status bar and a log file.
@@ -31,6 +38,7 @@
 | **Threat** (on a blocklist) | Red, pulsing ring |
 | DNS server | Yellow |
 | Local network device | Green |
+| Tailscale device, MagicDNS or tunnel endpoint | Lavender, dashed ring |
 | Broadcast / multicast | Grey |
 | Microsoft | Sky blue |
 | Amazon | Orange |
@@ -81,6 +89,9 @@ Download from the [Releases](https://github.com/Powellga/WinEtherCloneApe/releas
 - Windows 10 (1809 or later) or Windows 11, 64-bit
 - [Npcap](https://npcap.com/#download) - the free capture driver. Install it once (keep "WinPcap API-compatible Mode" ticked). Its license does not allow bundling it, so the installer links to it instead.
 - [Nmap](https://nmap.org/download#windows) with Zenmap - optional, for the Zenmap menu
+- [Wireshark](https://www.wireshark.org/download.html) - optional, to open packet captures (they are standard `.pcap` files)
+- OpenSSH Client - for Connect with SSH; built into Windows 10 and 11 (Settings > System > Optional features if it is missing)
+- [Tailscale](https://tailscale.com/download) - optional; with it installed, tailnet devices show their names
 - Administrator rights - the app asks for them when it starts
 
 ### Run
@@ -111,6 +122,8 @@ dotnet bin/Release/net8.0-windows/WinEtherCloneApe.dll --demo
 
 Add `--open-map` to have the World Map open after 20 seconds.
 
+`--capture-host <ip>` starts capturing on the last-used adapter and opens a packet capture for that address straight away.
+
 ### NuGet packages
 - SharpPcap 6.3.1 - packet capture
 - PacketDotNet 1.4.8 - packet parsing
@@ -126,7 +139,10 @@ NodePalette.cs     Colors, top-10 company definitions (ASNs, host names)
 ThreatIntel.cs     Blocklist download, cache and lookup
 LookupServices.cs  Reverse DNS and ip-api.com lookups
 MapWindow.cs       Leaflet map inside WebView2
-ExternalTools.cs   Zenmap and browser launching
+ExternalTools.cs   Zenmap, browser and SSH launching
+HostCaptureWindow.cs  Per-host packet capture window and .pcap saving
+SshDialog.cs       SSH user name and port prompt
+TailscaleService.cs   Tailscale address detection and device names
 IpUtil.cs          IP helpers and this PC's network facts
 AppSettings.cs     Settings in %LOCALAPPDATA%\WinEtherCloneApe\settings.json
 ```
@@ -136,6 +152,7 @@ AppSettings.cs     Settings in %LOCALAPPDATA%\WinEtherCloneApe\settings.json
 - Threat feeds are IPv4 only
 - Only scan hosts you own or have permission to scan - scanning other people's servers with Zenmap can break their terms of service or the law
 - Some addresses have no host name (no reverse DNS record)
+- Packet capture records only while the main capture is running, on the adapter selected there. Traffic inside a Tailscale tunnel is encrypted on the Ethernet/Wi-Fi adapter; pick the Tailscale adapter to capture it unencrypted.
 - Busy networks can still have overlapping labels; hover for the full details
 
 ## License

@@ -1,4 +1,4 @@
-﻿using Microsoft.Win32;
+using Microsoft.Win32;
 using PacketDotNet;
 using SharpPcap;
 using SharpPcap.LibPcap;
@@ -51,6 +51,10 @@ namespace WinEtherCloneApe
         private readonly ThreatIntel threatIntel = new();
         private readonly DnsResolverService dnsResolver = new();
         private readonly IpInfoService ipInfo;
+        private readonly TailscaleService tailscale = new();
+        private readonly ConcurrentDictionary<string, HostCapture> hostCaptures = new();
+        private readonly Dictionary<string, HostCaptureWindow> captureWindows = new();
+        private static readonly DoubleCollection TailscaleDash = CreateFrozenDash();
         private readonly bool demoMode;
         private readonly bool demoOpenMap;
 
@@ -69,10 +73,13 @@ namespace WinEtherCloneApe
         private bool isCapturing;
         private GeoInfo? homeGeo;
 
-        public MainWindow(bool demoMode = false, bool demoOpenMap = false)
+        private readonly string? captureHost;
+
+        public MainWindow(bool demoMode = false, bool demoOpenMap = false, string? captureHost = null)
         {
             this.demoMode = demoMode;
             this.demoOpenMap = demoOpenMap;
+            this.captureHost = captureHost;
             ipInfo = new IpInfoService(Http) { Enabled = settings.OnlineLookups };
 
             InitializeComponent();
@@ -86,6 +93,13 @@ namespace WinEtherCloneApe
 
         public static readonly ImageSource AppIcon =
             System.Windows.Media.Imaging.BitmapFrame.Create(new Uri("pack://application:,,,/app.ico"));
+
+        private static DoubleCollection CreateFrozenDash()
+        {
+            var dash = new DoubleCollection { 2, 1.5 };
+            dash.Freeze();
+            return dash;
+        }
 
         private static HttpClient CreateHttpClient()
         {
@@ -267,6 +281,7 @@ namespace WinEtherCloneApe
             AddLegendItem(panel, "Threat (blocklisted)", NodePalette.Threat, isLine: false);
             AddLegendItem(panel, "DNS server", NodePalette.DnsServer, isLine: false);
             AddLegendItem(panel, "Local network", NodePalette.LocalLan, isLine: false);
+            AddLegendItem(panel, "Tailscale (dashed ring)", NodePalette.Tailscale, isLine: false, dashedRing: true);
             AddLegendItem(panel, "Broadcast / multicast", NodePalette.Broadcast, isLine: false);
             foreach (var p in NodePalette.Providers)
                 AddLegendItem(panel, p.Name, p.Color, isLine: false);
@@ -292,7 +307,7 @@ namespace WinEtherCloneApe
 
             panel.Children.Add(new TextBlock
             {
-                Text = "Inner ring: your network\nOuter ring: the internet\n\nHover a host for details.\nRight-click for Zenmap,\nWhere is? and more.",
+                Text = "Inner ring: your network\nOuter ring: the internet\n\nHover a host for details.\nRight-click for Zenmap,\nWhere is?, browser, SSH,\npacket capture and more.",
                 Foreground = Brushes.Gray,
                 FontSize = 11,
                 Margin = new Thickness(0, 14, 0, 0),
@@ -319,7 +334,7 @@ namespace WinEtherCloneApe
             });
         }
 
-        private static void AddLegendItem(Panel panel, string text, Color color, bool isLine)
+        private static void AddLegendItem(Panel panel, string text, Color color, bool isLine, bool dashedRing = false)
         {
             var item = new StackPanel
             {
@@ -330,6 +345,22 @@ namespace WinEtherCloneApe
             FrameworkElement swatch = isLine
                 ? new Rectangle { Width = 18, Height = 3, Fill = new SolidColorBrush(color), VerticalAlignment = VerticalAlignment.Center }
                 : new Ellipse { Width = 13, Height = 13, Fill = new SolidColorBrush(color), Stroke = Brushes.White, StrokeThickness = 1 };
+            if (dashedRing)
+            {
+                var ring = new Grid { Width = 19, Height = 19 };
+                ring.Children.Add(new Ellipse
+                {
+                    Stroke = new SolidColorBrush(color),
+                    StrokeThickness = 1.5,
+                    StrokeDashArray = TailscaleDash
+                });
+                swatch.Width = 11;
+                swatch.Height = 11;
+                swatch.HorizontalAlignment = HorizontalAlignment.Center;
+                swatch.VerticalAlignment = VerticalAlignment.Center;
+                ring.Children.Add(swatch);
+                swatch = ring;
+            }
             swatch.Margin = new Thickness(0, 0, 8, 0);
 
             item.Children.Add(swatch);
@@ -354,9 +385,18 @@ namespace WinEtherCloneApe
 
             threatIntel.Updated += () => Dispatcher.BeginInvoke(OnThreatFeedsUpdated);
             _ = threatIntel.InitializeAsync(Http);
+            tailscale.AssumeTailnet = demoMode;
+            if (!demoMode) tailscale.RefreshInBackground();
 
             updateTimer.Start();
             if (demoMode) StartDemo();
+
+            // --capture-host <ip>: start capturing on the chosen adapter and open a packet capture for that address
+            if (!demoMode && captureHost != null && IPAddress.TryParse(captureHost, out var hostAddress) && startButton.IsEnabled)
+            {
+                StartCapture(this, new RoutedEventArgs());
+                OpenPacketCapture(hostAddress, IpUtil.Normalize(hostAddress), IpUtil.Normalize(hostAddress));
+            }
         }
 
         private void LoadNetworkDevices()
@@ -481,7 +521,20 @@ namespace WinEtherCloneApe
 
                 var packet = Packet.ParsePacket(rawPacket.LinkLayerType, rawPacket.Data);
                 if (ExtractPacketInfo(packet, rawPacket.Data.Length) is { } info)
+                {
                     Enqueue(info);
+
+                    // Per-host packet captures opened from the right-click menu
+                    if (!hostCaptures.IsEmpty)
+                    {
+                        foreach (var capture in hostCaptures.Values)
+                        {
+                            if (capture.Matches(info.Source, info.Destination))
+                                capture.Offer(rawPacket, packet, info.Source, info.Destination, info.Protocol,
+                                    info.SourcePort, info.DestinationPort);
+                        }
+                    }
+                }
             }
             catch
             {
@@ -622,6 +675,7 @@ namespace WinEtherCloneApe
 
             if (!isBroadcast)
             {
+                node.Tailscale = tailscale.Identify(address, ip, null);
                 dnsResolver.Request(ip);
                 if (!node.IsLocal)
                 {
@@ -707,6 +761,9 @@ namespace WinEtherCloneApe
                 {
                     ApplyGeo(node, geo);
                 }
+
+                // Picks up device names after each "tailscale status" refresh
+                node.Tailscale = tailscale.Identify(node.Address, node.IP, node.HostName);
             }
         }
 
@@ -776,6 +833,7 @@ namespace WinEtherCloneApe
             }
 
             if (tickCount % 5 == 0) ApplyLookupResults();
+            if (tickCount % 600 == 0 && !demoMode) tailscale.RefreshInBackground();
 
             RemoveExpired(now);
             LayoutAndRender(now);
@@ -802,7 +860,7 @@ namespace WinEtherCloneApe
 
             // Inner ring: this network. Outer ring: the internet, grouped by color.
             var inner = nodes.Values.Where(n => n.IsLocal || n.IsBroadcast)
-                .OrderBy(n => n.IsThisPc ? 0 : n.IsGateway ? 1 : n.IsBroadcast ? 3 : 2)
+                .OrderBy(n => n.IsThisPc && n.Tailscale == null ? 0 : n.IsGateway ? 1 : n.IsBroadcast ? 4 : n.Tailscale != null ? 3 : 2)
                 .ThenBy(n => n.Order)
                 .ToList();
             var outer = nodes.Values.Where(n => !n.IsLocal && !n.IsBroadcast)
@@ -889,9 +947,26 @@ namespace WinEtherCloneApe
             {
                 double haloSize = size + 14;
                 node.Halo.Visibility = Visibility.Visible;
+                node.Halo.Stroke = BrushFor(NodePalette.Threat);
+                node.Halo.StrokeThickness = 3;
+                node.Halo.StrokeDashArray = null;
                 node.Halo.Width = haloSize;
                 node.Halo.Height = haloSize;
                 node.Halo.Opacity = pulse * opacity;
+                Canvas.SetLeft(node.Halo, x - haloSize / 2);
+                Canvas.SetTop(node.Halo, y - haloSize / 2);
+            }
+            else if (node.Tailscale != null)
+            {
+                // Tailscale: a steady dashed ring, the "tunnel" mark
+                double haloSize = size + 10;
+                node.Halo.Visibility = Visibility.Visible;
+                node.Halo.Stroke = BrushFor(NodePalette.Tailscale);
+                node.Halo.StrokeThickness = 2;
+                node.Halo.StrokeDashArray = TailscaleDash;
+                node.Halo.Width = haloSize;
+                node.Halo.Height = haloSize;
+                node.Halo.Opacity = 0.9 * opacity;
                 Canvas.SetLeft(node.Halo, x - haloSize / 2);
                 Canvas.SetTop(node.Halo, y - haloSize / 2);
             }
@@ -921,7 +996,12 @@ namespace WinEtherCloneApe
         private static string LabelText(NetworkNode node)
         {
             string text;
-            if (node.IsThisPc) text = $"This PC ({node.IP})";
+            var ts = node.Tailscale;
+            if (ts?.Kind == TailscaleKind.ThisPc || (node.IsThisPc && ts != null)) text = $"This PC on Tailscale ({node.IP})";
+            else if (node.IsThisPc) text = $"This PC ({node.IP})";
+            else if (ts?.Kind == TailscaleKind.MagicDns) text = $"Tailscale MagicDNS ({node.IP})";
+            else if (ts?.Kind == TailscaleKind.Endpoint) text = $"Tailscale tunnel: {ts.Name}";
+            else if (ts?.Kind == TailscaleKind.Peer) text = ts.Name != "Tailscale device" ? $"{ts.Name} (Tailscale)" : $"{node.IP} (Tailscale)";
             else if (node.IsBroadcast) text = IpUtil.WellKnownName(node.IP)
                 ?? $"{node.IP} ({(IpUtil.IsMulticast(node.Address) ? "multicast" : "broadcast")})";
             else if (node.HostName != null) text = node.HostName;
@@ -984,7 +1064,7 @@ namespace WinEtherCloneApe
 
         #region Tooltip and right-click menu
 
-        private static readonly Dictionary<int, string> PortNames = new()
+        public static readonly Dictionary<int, string> PortNames = new()
         {
             [20] = "FTP-data", [21] = "FTP", [22] = "SSH", [23] = "Telnet", [25] = "SMTP", [53] = "DNS",
             [67] = "DHCP", [68] = "DHCP", [80] = "HTTP", [110] = "POP3", [123] = "NTP", [137] = "NetBIOS",
@@ -1010,6 +1090,24 @@ namespace WinEtherCloneApe
                 sb.AppendLine();
             }
 
+            if (node.Tailscale is { } ts)
+            {
+                string name = ts.DnsName ?? ts.Name;
+                sb.AppendLine(ts.Kind switch
+                {
+                    TailscaleKind.Endpoint => $"Tailscale: encrypted WireGuard tunnel traffic to {name}",
+                    TailscaleKind.Service => "Tailscale: coordination or DERP relay server",
+                    TailscaleKind.MagicDns => "Tailscale: MagicDNS resolver",
+                    _ => $"Tailscale: {name}"
+                });
+                var facts = new List<string>();
+                if (ts.OS is { Length: > 0 }) facts.Add(ts.OS);
+                if (ts.Online is { } online) facts.Add(online ? "online" : "offline");
+                if (ts.ExitNode) facts.Add("exit node in use");
+                if (ts.Relay is { Length: > 0 } && ts.Kind is TailscaleKind.Peer or TailscaleKind.ThisPc) facts.Add($"home relay {ts.Relay}");
+                if (facts.Count > 0) sb.AppendLine("   " + string.Join(", ", facts));
+            }
+
             if (node.Geo is { Success: true } geo)
             {
                 sb.AppendLine($"Owner: {geo.Owner}");
@@ -1027,7 +1125,7 @@ namespace WinEtherCloneApe
 
             sb.AppendLine($"Packets: {node.PacketCount:N0}    Data: {FormatBytes(node.BytesTransferred)}");
             sb.AppendLine($"First seen: {node.FirstSeen:T}    Last seen: {node.LastSeen:T}");
-            sb.Append("Right-click for Zenmap, Where is? and more");
+            sb.Append("Right-click for Zenmap, connect, packet capture and more");
             return sb.ToString();
         }
 
@@ -1060,6 +1158,29 @@ namespace WinEtherCloneApe
             var whereIs = new MenuItem { Header = "Where is?", IsEnabled = !node.IsBroadcast };
             whereIs.Click += async (_, _) => await ShowWhereIs(node);
             menu.Items.Add(whereIs);
+
+            menu.Items.Add(new Separator());
+            bool canConnect = !node.IsBroadcast && !node.IsThisPc;
+            var http = new MenuItem { Header = "Connect with browser (port 80)", IsEnabled = canConnect };
+            http.Click += (_, _) => OpenWeb(node, https: false);
+            menu.Items.Add(http);
+
+            var https = new MenuItem { Header = "Connect with browser (HTTPS, port 443)", IsEnabled = canConnect };
+            https.Click += (_, _) => OpenWeb(node, https: true);
+            menu.Items.Add(https);
+
+            var ssh = new MenuItem { Header = "Connect with SSH...", IsEnabled = canConnect };
+            ssh.Click += (_, _) => ConnectSsh(node);
+            menu.Items.Add(ssh);
+
+            var capture = new MenuItem
+            {
+                Header = demoMode ? "Packet capture (not available in demo mode)" : "Packet capture...",
+                IsEnabled = !demoMode && !node.IsBroadcast
+            };
+            capture.Click += (_, _) => OpenPacketCapture(node);
+            menu.Items.Add(capture);
+            menu.Items.Add(new Separator());
 
             if (node.Threat != null)
             {
@@ -1125,8 +1246,88 @@ namespace WinEtherCloneApe
             }
         }
 
+        private void OpenWeb(NetworkNode node, bool https)
+        {
+            string url = ExternalTools.WebUrl(node.IP, https, https ? 443 : 80);
+            ExternalTools.OpenUrl(url);
+            statusText.Text = $"Opened {url} in the browser";
+        }
+
+        private void ConnectSsh(NetworkNode node)
+        {
+            string? ssh = ExternalTools.FindSsh();
+            if (ssh == null)
+            {
+                MessageBox.Show(this,
+                    "The Windows SSH client is not installed.\n\nTurn it on in Settings > System > Optional features > " +
+                    "View features > OpenSSH Client, then try again.",
+                    "Connect with SSH", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            string target = node.Tailscale?.DnsName ?? node.HostName ?? node.IP;
+            var dialog = new SshDialog(target, settings.SshUser ?? Environment.UserName, settings.SshPort) { Owner = this };
+            if (dialog.ShowDialog() != true) return;
+
+            settings.SshUser = dialog.UserName;
+            settings.SshPort = dialog.Port;
+            settings.Save();
+
+            try
+            {
+                ExternalTools.LaunchSsh(ssh, dialog.UserName, node.IP, dialog.Port);
+                statusText.Text = $"SSH: {dialog.UserName}@{node.IP} port {dialog.Port}";
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Could not start SSH: {ex.Message}", "Connect with SSH",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private void OpenPacketCapture(NetworkNode node)
+        {
+            if (captureWindows.TryGetValue(node.IP, out var open))
+            {
+                if (open.WindowState == WindowState.Minimized) open.WindowState = WindowState.Normal;
+                open.Activate();
+                return;
+            }
+
+            string name = node.Tailscale is { Kind: TailscaleKind.Peer, Name: not "Tailscale device" } ts ? ts.Name
+                : node.HostName ?? "";
+            OpenPacketCapture(node.Address, node.IP, name.Length > 0 ? $"{name} ({node.IP})" : node.IP);
+        }
+
+        private void OpenPacketCapture(IPAddress address, string ip, string display)
+        {
+            var capture = new HostCapture(address, ip);
+            var window = new HostCaptureWindow(capture, display, () => isCapturing);
+            window.Closed += (_, _) =>
+            {
+                hostCaptures.TryRemove(ip, out _);
+                captureWindows.Remove(ip);
+            };
+            hostCaptures[ip] = capture;
+            captureWindows[ip] = window;
+            window.Show();
+
+            statusText.Text = isCapturing
+                ? $"Packet capture started for {ip}"
+                : $"Packet capture for {ip} will record once you press Start Capture";
+        }
+
         private async Task ShowWhereIs(NetworkNode node)
         {
+            if (node.Tailscale is { Kind: TailscaleKind.Peer or TailscaleKind.ThisPc or TailscaleKind.MagicDns })
+            {
+                MessageBox.Show(this,
+                    $"{LabelText(node)} is on your Tailscale network. Its {node.IP} address is private to the tailnet, " +
+                    "so it has no internet location to map. The device itself can be anywhere.",
+                    "Where is?", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
             if (node.IsLocal)
             {
                 MessageBox.Show(this,
@@ -1265,6 +1466,7 @@ namespace WinEtherCloneApe
         {
             updateTimer.Stop();
             StopCapture(null, null);
+            foreach (var window in captureWindows.Values.ToList()) window.Close();
             settings.Save();
         }
 
@@ -1291,6 +1493,10 @@ namespace WinEtherCloneApe
             }.Select(IPAddress.Parse).ToArray();
             var dnsServer = IPAddress.Parse("8.8.8.8");
             var random = new Random(7);
+            const string tailscaleSelfIp = "100.90.1.50";
+            LocalNetwork.AddLocalAddress(tailscaleSelfIp);
+            var tailscaleSelf = IPAddress.Parse(tailscaleSelfIp);
+            var tailnet = new[] { "100.71.20.5", "100.88.14.200" }.Select(IPAddress.Parse).ToArray();
 
             var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };
             timer.Tick += (_, _) =>
@@ -1325,6 +1531,14 @@ namespace WinEtherCloneApe
                     Send(lan[random.Next(lan.Length)], pcAddr, "TCP", 900, 445, port);
                 if (random.Next(12) == 0)
                     Send(pcAddr, IPAddress.Parse("8.8.4.4"), "ICMP", 98, 0, 0);
+                if (random.Next(5) == 0)
+                {
+                    // Tailscale: a peer over the tunnel, MagicDNS, and the tunnel's public endpoint
+                    var peer = tailnet[random.Next(tailnet.Length)];
+                    Send(tailscaleSelf, peer, "TCP", random.Next(100, 1400), port, 22);
+                    Send(peer, tailscaleSelf, "TCP", random.Next(100, 4000), 22, port);
+                    if (random.Next(3) == 0) Send(tailscaleSelf, IPAddress.Parse("100.100.100.100"), "UDP", 80, port, 53);
+                }
                 if (random.Next(10) == 0 && threatIntel.SampleListedIp() is { } bad)
                 {
                     var badAddr = IPAddress.Parse(bad);

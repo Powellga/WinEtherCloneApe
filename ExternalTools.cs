@@ -46,12 +46,68 @@ namespace WinEtherCloneApe
         }
 
         /// <summary>
-        /// Opens a URL in the default browser. Goes through explorer.exe so the browser
-        /// does not inherit this app's administrator rights.
+        /// Opens a URL in the default browser (or a file in its default program). Goes through
+        /// explorer.exe so the browser does not inherit this app's administrator rights.
         /// </summary>
         public static void OpenUrl(string url)
         {
             Process.Start(new ProcessStartInfo("explorer.exe") { ArgumentList = { url }, UseShellExecute = false });
+        }
+
+        /// <summary>Shows a file selected in File Explorer.</summary>
+        public static void ShowInFolder(string path)
+        {
+            Process.Start(new ProcessStartInfo("explorer.exe") { Arguments = $"/select,\"{path}\"", UseShellExecute = false });
+        }
+
+        /// <summary>Builds http://ip/ or https://ip:port/, with brackets around IPv6 addresses.</summary>
+        public static string WebUrl(string ip, bool https, int port)
+        {
+            string host = ip.Contains(':') ? $"[{ip}]" : ip;
+            bool defaultPort = https ? port == 443 : port == 80;
+            return $"{(https ? "https" : "http")}://{host}{(defaultPort ? "" : ":" + port)}/";
+        }
+
+        /// <summary>The OpenSSH client that ships with Windows 10 and 11.</summary>
+        public static string? FindSsh()
+        {
+            string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "OpenSSH", "ssh.exe");
+            return File.Exists(path) ? path : null;
+        }
+
+        /// <summary>A user name ssh accepts, with nothing a shell or Windows Terminal would treat as a command.</summary>
+        public static bool IsSafeUserName(string user) =>
+            user.Length is > 0 and <= 64 && user.All(c => char.IsLetterOrDigit(c) || c is '.' or '_' or '-' or '@' or '\\');
+
+        /// <summary>Opens an SSH session in Windows Terminal, or a console window when Windows Terminal is not installed.</summary>
+        public static void LaunchSsh(string sshPath, string user, string ip, int port)
+        {
+            string target = $"{user}@{ip}";
+            string wt = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Microsoft", "WindowsApps", "wt.exe");
+
+            if (File.Exists(wt))
+            {
+                try
+                {
+                    var psi = new ProcessStartInfo(wt) { UseShellExecute = false };
+                    foreach (var arg in new[] { "new-tab", "--title", $"SSH {target}", sshPath, "-p", port.ToString(), target })
+                        psi.ArgumentList.Add(arg);
+                    Process.Start(psi);
+                    return;
+                }
+                catch
+                {
+                    // Fall through to a plain console window
+                }
+            }
+
+            // cmd /k keeps the window open, so a refused connection's error stays readable
+            Process.Start(new ProcessStartInfo("cmd.exe")
+            {
+                Arguments = $"/k \"\"{sshPath}\" -p {port} {target}\"",
+                UseShellExecute = true
+            });
         }
     }
 }

@@ -9,6 +9,7 @@ namespace WinEtherCloneApe
     public enum NodeCategory
     {
         Threat,
+        Tailscale,
         DnsServer,
         Provider,
         LocalLan,
@@ -66,11 +67,13 @@ namespace WinEtherCloneApe
         public Provider? Provider { get; set; }
         public GeoInfo? Geo { get; set; }
         public ThreatMatch? Threat { get; set; }
+        public TailscaleInfo? Tailscale { get; set; }
         public SortedSet<int> ServicePorts { get; } = new();
 
         public NodeCategory Category =>
             Threat != null ? NodeCategory.Threat
             : IsBroadcast ? NodeCategory.Broadcast
+            : Tailscale != null ? NodeCategory.Tailscale
             : IsDnsServer ? NodeCategory.DnsServer
             : Provider != null ? NodeCategory.Provider
             : IsLocal ? NodeCategory.LocalLan

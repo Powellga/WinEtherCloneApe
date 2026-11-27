@@ -17,6 +17,7 @@ Not to be confused with **WinEtherApe**, the older Python/PyQt5 version (workspa
 dotnet build -c Release
 # Demo mode: simulated traffic, no adapter or admin needed when started via dotnet (skips the UAC manifest)
 dotnet bin\Release\net8.0-windows\WinEtherCloneApe.dll --demo            # add --open-map to auto-open the World Map after 20s
+# --capture-host <ip>: starts live capture on the last-used adapter and opens a packet capture for that IP (used to test packet capture without the right-click menu)
 # Real use: the exe requires admin (app.manifest requireAdministrator)
 bin\Release\net8.0-windows\WinEtherCloneApe.exe
 ```
@@ -46,6 +47,9 @@ Do NOT test the GUI by moving the mouse (SetCursorPos/mouse_event): Windows ofte
 - `LookupServices.cs` - DnsResolverService (reverse DNS, 4s timeout, 8 concurrent) and IpInfoService (ip-api.com batch, 100 IPs per call, every 4.5s)
 - `MapWindow.cs` - Leaflet 1.9.4 map in WebView2, served from a virtual host `https://winetherape.map/`
 - `ExternalTools.cs` - Zenmap launch (`zenmap.exe -t <ip> -p "<profile>"`, auto-starts the scan), browser via explorer.exe (so the browser is not elevated)
+- `HostCaptureWindow.cs` - per-host packet capture: `HostCapture` (filled on the capture thread from `OnPacketArrival`) and a Wireshark-style window (live list, verbose decode plus hex dump, Save .pcap via `CaptureFileWriterDevice`, Open in Wireshark via explorer.exe so Wireshark is not elevated). Saves to `%USERPROFILE%\WinEtherCloneApe Captures` (deliberately not Documents: on this PC Documents is the TEMARK OneDrive, and captures hold raw traffic). Caps: 200k packets or 512 MB, then auto-pause.
+- `SshDialog.cs` - user name and port prompt; values saved in settings (SshUser, SshPort)
+- `TailscaleService.cs` - runs `tailscale status --json` (Program Files\Tailscale) at startup and every 60s for device names, OS, online state and tunnel endpoints (CurAddr). Without the CLI: fd7a:115c:a1e0::/48 always, 100.64.0.0/10 only when a Tailscale adapter is up (that range is also ISP carrier-grade NAT), 100.100.100.100 = MagicDNS, *.tailscale.com host names = Tailscale servers. Skipped in demo mode (demo sets AssumeTailnet instead).
 - `IpUtil.cs` - IP helpers plus `LocalNetwork` (this PC's addresses, subnet broadcasts, DNS servers, gateways)
 - `AppSettings.cs` - `%LOCALAPPDATA%\WinEtherCloneApe\settings.json` (last adapter, Zenmap path, online lookups)
 
@@ -53,7 +57,8 @@ Do NOT test the GUI by moving the mouse (SetCursorPos/mouse_event): Windows ofte
 
 - Capture thread only parses packets into `PacketInfo` and enqueues them (capped at 200k). A 100ms DispatcherTimer drains the queue and owns all node/edge state, so there is no shared mutable state across threads.
 - Shapes are created once per node/edge and updated each tick (not cleared and redrawn). This is what makes tooltips and context menus work.
-- Node color priority: Threat > Broadcast > DNS server > Provider > Local > Other (`NetworkNode.Category`). Red is reserved for threats.
+- Node color priority: Threat > Broadcast > Tailscale > DNS server > Provider > Local > Other (`NetworkNode.Category`). Red is reserved for threats. Tailscale is lavender with a steady dashed ring (the Halo ellipse, which is the pulsing red ring for threats).
+- Right-click Connect items: browser `http://ip/` and `https://ip/` via explorer.exe; SSH via `%SystemRoot%\System32\OpenSSH\ssh.exe` in Windows Terminal (`wt.exe new-tab`), falling back to `cmd /k`. User names are validated (`ExternalTools.IsSafeUserName`) because they go on a command line.
 - Broadcast detection: subnet broadcast addresses, 255.255.255.255, multicast, AND Ethernet destination ff:ff:ff:ff:ff:ff. ARP requests are drawn to the 255.255.255.255 node. Broadcast lines are grey.
 - DNS server detection: the endpoint using port 53/853, plus adapter DNS servers and known public resolvers.
 - Provider detection: ASN from ip-api, then reverse DNS host suffix, then org name keywords.
@@ -75,4 +80,5 @@ Run `--demo`, then screenshot with PrintWindow (PW_RENDERFULLCONTENT) from Power
 - 2026-10-30: v2.0.0. Big rewrite of the original single-file v1 (Aug 2025): split into files, stability fixes, threat detection, color palette, Zenmap and Where is? right-click menu, World Map, tooltips, adapter auto-select. The README's old "files too large, download from Google Drive" note was dropped: the repo source was complete (the Drive file was the built program).
 - 2026-10-30: GitHub release v2.0.0 published with WinEtherCloneApe-2.0.0-win-x64.zip (framework-dependent publish output): https://github.com/Powellga/WinEtherCloneApe/releases/tag/v2.0.0
 - 2026-10-30: v2.0.1 - app icon (app.ico, generated), single-file self-contained build, Inno Setup installer, multicast label fix. Verified: single exe live-captured 60 hosts; silent install, uninstall and reinstall all pass. README screenshot must stay the demo one (a live capture shows Gregg's real hosts, PC name and IPs in a public repo).
+- 2026-11-27: v2.1.0 - right-click Connect with browser (80 and 443) and SSH, Tailscale category (lavender, dashed ring, names from `tailscale status --json`), per-host packet capture window with .pcap export. The 2.0.1 GitHub release was never published (blocked); 2.1.0 replaces it. Verified live: capture window recorded the router's packets, decode pane works, saved .pcap read by capinfos/tshark (77 packets, Ethernet); Tailscale DERP servers, a tunnel endpoint and a tailnet device were classified. Not exercised by clicking: the SSH and browser menu items (the right-click menu cannot be opened without the mouse).
 - abuse.ch SSLBL IP list stopped updating in Jan 2025 (comments only), so it was removed from the feeds.

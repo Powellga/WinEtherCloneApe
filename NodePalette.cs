@@ -25,6 +25,7 @@ namespace WinEtherCloneApe
         public static readonly Color LocalLan = Color.FromRgb(50, 205, 50);
         public static readonly Color Broadcast = Color.FromRgb(120, 120, 120);
         public static readonly Color External = Color.FromRgb(176, 190, 197);
+        public static readonly Color Tailscale = Color.FromRgb(179, 136, 255);
 
         // Connection colors
         public static readonly Color TcpLine = Colors.Cyan;
@@ -160,6 +161,7 @@ namespace WinEtherCloneApe
         {
             NodeCategory.Threat => Threat,
             NodeCategory.Broadcast => Broadcast,
+            NodeCategory.Tailscale => Tailscale,
             NodeCategory.DnsServer => DnsServer,
             NodeCategory.Provider => node.Provider!.Color,
             NodeCategory.LocalLan => LocalLan,
@@ -170,6 +172,7 @@ namespace WinEtherCloneApe
         {
             NodeCategory.Threat => "THREAT",
             NodeCategory.Broadcast => "Broadcast / multicast",
+            NodeCategory.Tailscale => node.Tailscale!.Description,
             NodeCategory.DnsServer => node.IsLocal ? "DNS server (local network)" : "DNS server",
             NodeCategory.Provider => node.Provider!.Name,
             NodeCategory.LocalLan => node.IsThisPc ? "This PC" : node.IsGateway ? "Router / gateway" : "Local network device",
