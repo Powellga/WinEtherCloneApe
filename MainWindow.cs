@@ -73,6 +73,10 @@ namespace WinEtherCloneApe
         private Point longPressStart;
 
         private ICaptureDevice? currentDevice;
+        private RemoteCaptureSession? remoteSession;
+        private readonly object remotePacketLock = new();
+        private static readonly object RemoteDeviceMarker = new();
+        private const string RemoteAdapterName = "remote:ssh-router";
         private readonly ConcurrentQueue<PacketInfo> packetQueue = new();
         private int queuedPackets;
         private readonly Dictionary<string, NetworkNode> nodes = new();
@@ -97,10 +101,13 @@ namespace WinEtherCloneApe
         private readonly string? captureHost;
 
         private readonly double startZoom;
+        private readonly string? replayPcap;
 
-        public MainWindow(bool demoMode = false, bool demoOpenMap = false, string? captureHost = null, double startZoom = 1)
+        public MainWindow(bool demoMode = false, bool demoOpenMap = false, string? captureHost = null, double startZoom = 1,
+            string? replayPcap = null)
         {
             this.startZoom = startZoom;
+            this.replayPcap = replayPcap;
             this.demoMode = demoMode;
             this.demoOpenMap = demoOpenMap;
             this.captureHost = captureHost;
@@ -619,10 +626,29 @@ namespace WinEtherCloneApe
                 StartCapture(this, new RoutedEventArgs());
                 OpenPacketCapture(hostAddress, IpUtil.Normalize(hostAddress), IpUtil.Normalize(hostAddress));
             }
+
+            // --replay-pcap <file>: tests the router capture path (pcap stream reader and packet handling) without SSH
+            if (replayPcap != null && File.Exists(replayPcap))
+            {
+                isCapturing = true;
+                statusText.Text = $"Replaying {Path.GetFileName(replayPcap)}";
+                Task.Run(() =>
+                {
+                    using var stream = File.OpenRead(replayPcap);
+                    PcapStreamReader.ReadAll(stream, OnRemotePacket, CancellationToken.None);
+                });
+            }
         }
 
         private void LoadNetworkDevices()
         {
+            var remoteItem = new ComboBoxItem
+            {
+                Content = "Router over SSH (whole network: UniFi gateway or Linux router)...",
+                Tag = RemoteDeviceMarker,
+                ToolTip = "Streams the router's packets to this app with tcpdump over SSH, so you see every device's traffic"
+            };
+
             try
             {
                 var devices = CaptureDeviceList.Instance
@@ -634,29 +660,28 @@ namespace WinEtherCloneApe
                 {
                     deviceCombo.Items.Add(new ComboBoxItem { Content = label, Tag = device });
                 }
+                deviceCombo.Items.Add(remoteItem);
 
                 // Prefer the last adapter used, then the one with the default gateway
-                int index = devices.FindIndex(x => x.Device.Name == settings.LastAdapterName);
+                int index = settings.LastAdapterName == RemoteAdapterName ? devices.Count
+                    : devices.FindIndex(x => x.Device.Name == settings.LastAdapterName);
                 if (index < 0 && LocalNetwork.PrimaryAddress != null)
                     index = devices.FindIndex(x => x.Ipv4s.Contains(LocalNetwork.PrimaryAddress));
 
-                if (deviceCombo.Items.Count > 0)
-                {
-                    deviceCombo.SelectedIndex = Math.Max(0, index);
-                    statusText.Text = "Network interfaces loaded - press Start Capture";
-                }
-                else
-                {
-                    statusText.Text = "No network interfaces found";
-                    startButton.IsEnabled = false;
-                }
+                deviceCombo.SelectedIndex = Math.Max(0, index);
+                statusText.Text = devices.Count > 0
+                    ? "Network interfaces loaded - press Start Capture"
+                    : "No local network interfaces found (capture from the router still works)";
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error loading network devices: {ex.Message}\n\nMake sure Npcap is installed (https://npcap.com).",
+                // Without Npcap, capturing from the router over SSH still works
+                if (!deviceCombo.Items.Contains(remoteItem)) deviceCombo.Items.Add(remoteItem);
+                deviceCombo.SelectedItem = remoteItem;
+                MessageBox.Show($"Error loading network devices: {ex.Message}\n\nMake sure Npcap is installed (https://npcap.com). " +
+                                "Capturing from your router over SSH still works without it.",
                     "Initialization Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                statusText.Text = "Failed to load network interfaces";
-                startButton.IsEnabled = false;
+                statusText.Text = "Failed to load local network interfaces";
             }
         }
 
@@ -678,6 +703,11 @@ namespace WinEtherCloneApe
 
         private void StartCapture(object sender, RoutedEventArgs e)
         {
+            if (deviceCombo.SelectedItem is ComboBoxItem { Tag: var tag } && tag == RemoteDeviceMarker)
+            {
+                StartRemoteCapture();
+                return;
+            }
             if (deviceCombo.SelectedItem is not ComboBoxItem { Tag: ICaptureDevice device }) return;
 
             try
@@ -706,8 +736,73 @@ namespace WinEtherCloneApe
             }
         }
 
+        private async void StartRemoteCapture()
+        {
+            var dialog = new RemoteCaptureDialog(settings) { Owner = this };
+            if (dialog.ShowDialog() != true) return;
+
+            var session = new RemoteCaptureSession(dialog.Host, dialog.Port, dialog.User, dialog.Password, settings, this);
+            startButton.IsEnabled = false;
+            deviceCombo.IsEnabled = false;
+            statusText.Text = $"Connecting to the router at {dialog.Host}...";
+            try
+            {
+                LocalNetwork.Refresh();
+                await Task.Run(session.Connect);
+                session.InterfaceStopped += (name, reason) => Dispatcher.BeginInvoke(() => OnRemoteInterfaceStopped(session, name, reason));
+                session.Start(dialog.Interfaces, settings.RouterSnapLength, OnRemotePacket);
+
+                remoteSession = session;
+                settings.LastAdapterName = RemoteAdapterName;
+                settings.Save();
+                isCapturing = true;
+                stopButton.IsEnabled = true;
+                statusText.Text = $"Capturing from the router at {dialog.Host} ({string.Join(", ", dialog.Interfaces)})";
+            }
+            catch (Exception ex)
+            {
+                session.Dispose();
+                startButton.IsEnabled = true;
+                deviceCombo.IsEnabled = true;
+                statusText.Text = "Could not start capture from the router";
+                MessageBox.Show(this, ex.Message, "Capture from router", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        /// <summary>Packets from the router arrive on one thread per interface; handle them one at a time.</summary>
+        private void OnRemotePacket(RawCapture raw, int originalLength)
+        {
+            lock (remotePacketLock) HandleRawPacket(raw, originalLength);
+        }
+
+        private void OnRemoteInterfaceStopped(RemoteCaptureSession session, string name, string reason)
+        {
+            if (session != remoteSession) return;
+            if (session.ActiveInterfaces > 0)
+            {
+                statusText.Text = $"Router capture on {name} stopped: {reason}";
+                return;
+            }
+            StopCapture(null, null);
+            statusText.Text = $"Router capture stopped: {reason}";
+            MessageBox.Show(this, $"Capture from the router stopped.\n\n{name}: {reason}", "Capture from router",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
         private void StopCapture(object? sender, RoutedEventArgs? e)
         {
+            if (remoteSession != null)
+            {
+                var session = remoteSession;
+                remoteSession = null;
+                isCapturing = false;
+                _ = Task.Run(session.Dispose); // closing SSH can take a moment; keep the window responsive
+                startButton.IsEnabled = true;
+                stopButton.IsEnabled = false;
+                deviceCombo.IsEnabled = true;
+                statusText.Text = "Capture stopped";
+                return;
+            }
             if (currentDevice == null || !isCapturing) return;
 
             try
@@ -738,11 +833,27 @@ namespace WinEtherCloneApe
             try
             {
                 var rawPacket = e.GetPacket();
+                HandleRawPacket(rawPacket, rawPacket.Data.Length);
+            }
+            catch
+            {
+                // Silently ignore malformed packets
+            }
+        }
+
+        /// <summary>
+        /// Shared by local capture and capture from the router. originalLength is the packet's real size,
+        /// which can be larger than the data when the router sends only the first bytes of each packet.
+        /// </summary>
+        private void HandleRawPacket(RawCapture rawPacket, int originalLength)
+        {
+            try
+            {
                 Interlocked.Increment(ref totalPackets);
-                Interlocked.Add(ref totalBytes, rawPacket.Data.Length);
+                Interlocked.Add(ref totalBytes, originalLength);
 
                 var packet = Packet.ParsePacket(rawPacket.LinkLayerType, rawPacket.Data);
-                if (ExtractPacketInfo(packet, rawPacket.Data.Length) is { } info)
+                if (ExtractPacketInfo(packet, originalLength) is { } info)
                 {
                     Enqueue(info);
 
@@ -1769,6 +1880,9 @@ namespace WinEtherCloneApe
             string adapter = deviceCombo.SelectedItem is ComboBoxItem { Content: string label } ? label : "no adapter";
             long dropped = Interlocked.Read(ref droppedPackets);
             string state = demoMode ? "Demo mode (simulated traffic)."
+                : isCapturing && remoteSession is { } remote
+                    ? $"Capturing from the router at {remote.Host} on {string.Join(", ", remote.Interfaces)}: all traffic the router " +
+                      "forwards on those interfaces is seen (devices talking to each other on the same switch do not pass through it)."
                 : isCapturing ? $"Capturing on: {adapter}. Only traffic on this adapter is seen."
                 : "Capture is stopped, so nothing new is being checked.";
             return state + (dropped > 0 ? $" The display skipped {dropped:N0} packets under load; their addresses were still checked." : "");

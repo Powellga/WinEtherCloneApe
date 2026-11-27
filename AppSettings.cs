@@ -15,6 +15,15 @@ namespace WinEtherCloneApe
         public int SshPort { get; set; } = 22;
         public bool ThreatSound { get; set; } = true;
 
+        // Remote capture from a UniFi gateway over SSH. The password lives in Windows Credential Manager, never here.
+        public string RouterHost { get; set; } = "";
+        public int RouterPort { get; set; } = 22;
+        public string RouterUser { get; set; } = "root";
+        public string RouterInterfaces { get; set; } = "br0";
+        public int RouterSnapLength { get; set; } = 512;
+        /// <summary>Trusted SSH host key fingerprints (SHA-256), keyed by "host:port".</summary>
+        public Dictionary<string, string> RouterHostKeys { get; set; } = new();
+
         public static string DataFolder { get; } = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinEtherCloneApe");
 

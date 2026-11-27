@@ -9,6 +9,10 @@
 
 ![WinEtherCloneApe Screenshot](screenshot.png)
 
+## What's new in 2.4
+
+- **Watch your whole network from the router** - choose **Router over SSH** in the Network Interface list to see every device's traffic, not just this PC's. The app logs in to your UniFi gateway (UDM, UDM SE, UDM Pro, UCG, UXG) or any Linux router that has tcpdump, and streams the router's packets here over SSH. Nothing is installed on the router. Every feature works on this traffic: the map, threat checks for every phone, TV and smart device, the threat report and per-host packet capture. See [Capture from your router](#capture-from-your-router).
+
 ## What's new in 2.3
 
 - **Thorough threat checking** - IPv6 addresses are now checked, DNS lookups of malware and phishing domains are caught, every address seen this session is re-checked when the lists update, lists refresh while the app runs, and nothing is skipped under heavy traffic. Three new lists: HaGeZi Threat Intelligence (addresses and domains), Spamhaus DROP IPv6 and Phishing Army.
@@ -101,10 +105,34 @@ Cached in `%LOCALAPPDATA%\WinEtherCloneApe\threatfeeds`; the cached copy is used
 - The **Threat report** (button in the legend, or click the threat counter) lists every threat this session: the address or domain, which lists it is on, **which of your devices talked to it**, **who started the conversation** (from the TCP handshake), ports, traffic, and first and last seen. It also states exactly how many addresses and names were checked. Export it to CSV for Excel.
 
 ### Limits
-- Only the selected adapter is captured. Traffic inside a VPN or Tailscale tunnel shows up as the tunnel's endpoint on the Ethernet/Wi-Fi adapter; select the tunnel adapter to check what is inside it.
+- Only the selected adapter is captured, unless you capture from your router (see below). Traffic inside a VPN or Tailscale tunnel shows up as the tunnel's endpoint on the Ethernet/Wi-Fi adapter; select the tunnel adapter to check what is inside it.
 - Encrypted DNS (DNS over HTTPS or TLS, used by some browsers) hides the names being looked up, so only the addresses are checked for those.
 - Detection is reputation-based: it catches known bad addresses and domains. A new threat that is on no list yet is not detected until it is listed (then it is caught at the next list update).
 - Private, multicast and reserved addresses are never flagged; they cannot be on public lists.
+
+## Capture from your router
+
+On a normal PC, the app can only see traffic to and from that PC. Your router sees everything that goes between your devices and the internet, and between your VLANs. With **Router over SSH**, the router runs `tcpdump` and sends the packets to the app over an encrypted SSH connection.
+
+### Set up a UniFi gateway
+1. In UniFi OS, go to **Settings, Control Plane, Console**, turn on **SSH** and set a strong password. The user name is `root`.
+2. Allow SSH from your PC only. In the UniFi Network app, add two firewall rules for traffic **to the gateway itself** (zone-based firewall: from the **Internal** zone to the **Gateway** zone; older versions: **LAN Local** rules), in this order:
+   - **Allow** TCP port 22 from your PC's fixed IP address
+   - **Block** TCP port 22 from all internal networks
+
+   Only port 22 is blocked, so the router's web page keeps working. Give your PC a fixed address first (a fixed IP in its network settings, or a DHCP reservation in UniFi).
+3. In WinEtherCloneApe, choose **Router over SSH** in the Network Interface list and press **Start Capture**. Enter the router's address and password, press **Find interfaces** to fill in the LAN and VLAN bridges, then press **Start**.
+
+### What to watch
+- `br0` is the main LAN. Each VLAN has its own bridge, such as `br10`. Watching the bridges shows **which of your devices** talks to which internet host, before the router's address translation.
+- Adding the WAN port (for example `eth8` on a UDM SE; **Find interfaces** lists them all) also shows probes from the internet that the firewall blocks. Internet traffic then appears twice, once from the device and once from the router's public address.
+- Traffic between two devices on the same VLAN goes through your switches, not the router, so it is not seen.
+
+### Safety
+- **The router's identity is pinned.** The first connection shows the router's SSH key and asks you to trust it. After that, the app refuses to connect if the key ever changes, so another device cannot pretend to be your router. After a router reset or replacement, press **Forget saved password and router key** in the dialog.
+- **The password is kept in Windows Credential Manager** (as `WinEtherCloneApe:ssh:root@<router>:<port>`), never in the settings file. Untick **Remember password** to type it each time.
+- **Nothing is left behind.** tcpdump runs only while you capture and is stopped when you press Stop Capture. Only the first 512 bytes of each packet are sent, which keeps the load on the router and network low. The app leaves its own SSH connection out of the capture.
+
 ## Online lookups
 
 With **Online lookups** ticked, internet addresses are sent to [ip-api.com](https://ip-api.com) (free, no key, plain HTTP) to find their owner and location. This powers the company colors, tooltips, Where is? and the World Map. Untick it to keep addresses on your PC; host-name matching and threat detection still work.
@@ -124,6 +152,7 @@ Download from the [Releases](https://github.com/Powellga/WinEtherCloneApe/releas
 - OpenSSH Client - for Connect with SSH; built into Windows 10 and 11 (Settings > System > Optional features if it is missing)
 - [Tailscale](https://tailscale.com/download) - optional; with it installed, tailnet devices show their names
 - Administrator rights - the app asks for them when it starts
+- For capture from your router: SSH turned on in the router (UniFi OS: Settings, Control Plane, Console). Npcap is not needed for this.
 
 ### Run
 Start **WinEtherCloneApe** from the Start Menu. The internet-facing adapter is picked for you; press **Start Capture**.
@@ -153,11 +182,12 @@ dotnet bin/Release/net8.0-windows/WinEtherCloneApe.dll --demo
 
 Add `--open-map` to have the World Map open after 20 seconds.
 
-`--capture-host <ip>` starts capturing on the last-used adapter and opens a packet capture for that address straight away. `--zoom <factor>` starts zoomed in (for example `--zoom 2.5`).
+`--capture-host <ip>` starts capturing on the last-used adapter and opens a packet capture for that address straight away. `--zoom <factor>` starts zoomed in (for example `--zoom 2.5`). `--replay-pcap <file>` feeds a `.pcap` file through the same reader used for capture from a router.
 
 ### NuGet packages
 - SharpPcap 6.3.1 - packet capture
 - PacketDotNet 1.4.8 - packet parsing
+- SSH.NET 2026.0.1 - SSH connection for capture from a router
 - Microsoft.Web.WebView2 - maps
 
 ## Project layout
@@ -176,6 +206,9 @@ ThreatMonitor.cs   Session record of every address and DNS name, threat checks a
 ThreatReportWindow.cs Threat report window and CSV export
 DnsParser.cs       Reads DNS lookups and answers from packets
 SshDialog.cs       SSH user name and port prompt
+RemoteCapture.cs   Capture from a router: tcpdump over SSH, pcap stream reader, host key pinning
+RemoteCaptureDialog.cs  Router address, login and interfaces
+CredentialStore.cs Router password in Windows Credential Manager
 TailscaleService.cs   Tailscale address detection and device names
 IpUtil.cs          IP helpers and this PC's network facts
 AppSettings.cs     Settings in %LOCALAPPDATA%\WinEtherCloneApe\settings.json
@@ -198,5 +231,6 @@ MIT - see [LICENSE.txt](LICENSE.txt).
 - Built by Gregg Powell (g.a.powell@protonmail.com)
 - Inspired by [EtherApe](https://etherape.sourceforge.io/) for Linux
 - [SharpPcap](https://github.com/chmorgan/sharppcap) and [PacketDotNet](https://github.com/chmorgan/packetdotnet) by Chris Morgan
+- [SSH.NET](https://github.com/sshnet/SSH.NET) for the SSH connection to routers
 - Maps by [Leaflet](https://leafletjs.com/) with Esri dark gray tiles
 - Threat data from FireHOL, abuse.ch, Proofpoint Emerging Threats, CINS Score, HaGeZi, Spamhaus and Phishing Army
