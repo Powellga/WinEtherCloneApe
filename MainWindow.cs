@@ -72,6 +72,13 @@ namespace WinEtherCloneApe
         private DispatcherTimer? longPressTimer;
         private Point longPressStart;
 
+        // Isolate: show one host in the center with only the hosts it talks to. Everything else is
+        // still captured, tracked and threat-checked in the background, just hidden.
+        private string? isolatedIp;
+        private readonly HashSet<string> isolatedVisible = new();
+        private Button showAllButton = null!;
+        private string? isolateAtStart;
+
         private ICaptureDevice? currentDevice;
         private RemoteCaptureSession? remoteSession;
         private readonly object remotePacketLock = new();
@@ -104,10 +111,11 @@ namespace WinEtherCloneApe
         private readonly string? replayPcap;
 
         public MainWindow(bool demoMode = false, bool demoOpenMap = false, string? captureHost = null, double startZoom = 1,
-            string? replayPcap = null)
+            string? replayPcap = null, string? isolate = null)
         {
             this.startZoom = startZoom;
             this.replayPcap = replayPcap;
+            isolateAtStart = isolate;
             this.demoMode = demoMode;
             this.demoOpenMap = demoOpenMap;
             this.captureHost = captureHost;
@@ -223,7 +231,13 @@ namespace WinEtherCloneApe
                 Margin = new Thickness(4, 0, 10, 0)
             };
 
+            showAllButton = MakeButton("Show All Hosts", 120, Color.FromRgb(150, 90, 20));
+            showAllButton.ToolTip = "Leave the isolated view and show every host again (or press Esc)";
+            showAllButton.Visibility = Visibility.Collapsed;
+            showAllButton.Click += (_, _) => EndIsolation();
+
             controlPanel.Children.Add(mapButton);
+            controlPanel.Children.Add(showAllButton);
             controlPanel.Children.Add(resetViewButton);
             controlPanel.Children.Add(zoomText);
             controlPanel.Children.Add(onlineLookupsCheck);
@@ -490,6 +504,7 @@ namespace WinEtherCloneApe
                     case Key.OemPlus or Key.Add: ZoomAt(center, 1.25); e.Handled = true; break;
                     case Key.OemMinus or Key.Subtract: ZoomAt(center, 1 / 1.25); e.Handled = true; break;
                     case Key.D0 or Key.NumPad0 or Key.Home: ResetView(); e.Handled = true; break;
+                    case Key.Escape when isolatedIp != null: EndIsolation(); e.Handled = true; break;
                 }
             };
         }
@@ -542,6 +557,46 @@ namespace WinEtherCloneApe
 
         /// <summary>Redraws straight away so dragging and zooming feel immediate.</summary>
         private void RenderNow() => RenderView(DateTime.Now);
+
+        /// <summary>Shows only this host (centered) and the hosts it has connections with.</summary>
+        private void Isolate(NetworkNode node)
+        {
+            isolatedIp = node.IP;
+            showAllButton.Visibility = Visibility.Visible;
+            ResetView();
+            UpdateIsolatedSet();
+            LayoutAndRender(DateTime.Now);
+            statusText.Text = $"Isolated {LabelText(node, 48)}. Everything else is still being captured. Press Show All Hosts or Esc to return.";
+        }
+
+        private void EndIsolation()
+        {
+            if (isolatedIp == null) return;
+            isolatedIp = null;
+            isolatedVisible.Clear();
+            showAllButton.Visibility = Visibility.Collapsed;
+            ResetView();
+            LayoutAndRender(DateTime.Now);
+            statusText.Text = "Showing all hosts";
+        }
+
+        /// <summary>The isolated host plus every host it currently has a connection with.</summary>
+        private void UpdateIsolatedSet()
+        {
+            isolatedVisible.Clear();
+            if (isolatedIp == null) return;
+            isolatedVisible.Add(isolatedIp);
+            foreach (var edge in edges.Values)
+            {
+                if (edge.Source == isolatedIp) isolatedVisible.Add(edge.Destination);
+                else if (edge.Destination == isolatedIp) isolatedVisible.Add(edge.Source);
+            }
+        }
+
+        private bool IsShown(NetworkNode node) => isolatedIp == null || isolatedVisible.Contains(node.IP);
+
+        private bool IsShown(NetworkEdge edge) =>
+            isolatedIp == null || edge.Source == isolatedIp || edge.Destination == isolatedIp;
 
         #endregion
 
@@ -619,6 +674,22 @@ namespace WinEtherCloneApe
             if (demoMode) StartDemo();
             if (Math.Abs(startZoom - 1) > 0.01)
                 Dispatcher.BeginInvoke(() => ZoomAt(ViewCenter, startZoom), DispatcherPriority.Loaded);
+
+            // --isolate <ip|busiest>: isolates a host after 15 seconds (for testing without the right-click menu)
+            if (isolateAtStart != null)
+            {
+                var isolateTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
+                isolateTimer.Tick += (_, _) =>
+                {
+                    isolateTimer.Stop();
+                    var target = isolateAtStart == "busiest"
+                        ? nodes.Values.OrderByDescending(n => edges.Values.Count(x => x.Source == n.IP || x.Destination == n.IP))
+                            .FirstOrDefault(n => !n.IsBroadcast && !n.IsThisPc)
+                        : nodes.GetValueOrDefault(isolateAtStart);
+                    if (target != null) Isolate(target);
+                };
+                isolateTimer.Start();
+            }
 
             // --capture-host <ip>: start capturing on the chosen adapter and open a packet capture for that address
             if (!demoMode && captureHost != null && IPAddress.TryParse(captureHost, out var hostAddress) && startButton.IsEnabled)
@@ -1235,6 +1306,7 @@ namespace WinEtherCloneApe
             long dropped = Interlocked.Read(ref droppedPackets);
             statsText.Text = $"Packets: {Interlocked.Read(ref totalPackets):N0} | Bytes: {FormatBytes(Interlocked.Read(ref totalBytes))} | " +
                              $"Hosts: {nodes.Count} | Connections: {edges.Count}" +
+                             (isolatedIp != null ? $" | Isolated view: {isolatedVisible.Count - 1} of them connected to {isolatedIp}" : "") +
                              (dropped > 0 ? $" | Display skipped {dropped:N0} packets (their addresses were still checked)" : "");
             int threats = threatMonitor.ThreatCount;
             if (threats > 0)
@@ -1272,8 +1344,27 @@ namespace WinEtherCloneApe
                 .ToList();
 
             double innerRadius = outer.Count == 0 ? outerRadius * 0.7 : outerRadius * 0.42;
-            PlaceRing(inner, center, inner.Count == 1 ? 0 : innerRadius, -Math.PI / 2);
-            PlaceRing(outer, center, outerRadius, -Math.PI / 2 + Math.PI / Math.Max(1, outer.Count));
+
+            if (isolatedIp != null && nodes.TryGetValue(isolatedIp, out var focus))
+            {
+                // Isolated: the host in the center, the hosts it talks to on one ring around it (local
+                // ones first, then by color). Hidden hosts keep their normal ring spots for the return.
+                UpdateIsolatedSet();
+                var shown = isolatedVisible;
+                PlaceRing(inner, center, inner.Count == 1 ? 0 : innerRadius, -Math.PI / 2, shown);
+                PlaceRing(outer, center, outerRadius, -Math.PI / 2 + Math.PI / Math.Max(1, outer.Count), shown);
+
+                PlaceRing(new List<NetworkNode> { focus }, center, 0, 0);
+                var neighbors = inner.Concat(outer).Where(n => n != focus && shown.Contains(n.IP)).ToList();
+                double ringRadius = neighbors.Count <= 6 ? outerRadius * 0.6 : outerRadius * 0.85;
+                PlaceRing(neighbors, center, ringRadius, -Math.PI / 2);
+            }
+            else
+            {
+                if (isolatedIp != null) EndIsolation(); // the isolated host is gone (cleared)
+                PlaceRing(inner, center, inner.Count == 1 ? 0 : innerRadius, -Math.PI / 2);
+                PlaceRing(outer, center, outerRadius, -Math.PI / 2 + Math.PI / Math.Max(1, outer.Count));
+            }
 
             RenderView(now);
         }
@@ -1287,6 +1378,12 @@ namespace WinEtherCloneApe
             foreach (var edge in edges.Values)
             {
                 if (!nodes.TryGetValue(edge.Source, out var a) || !nodes.TryGetValue(edge.Destination, out var b)) continue;
+                if (!IsShown(edge))
+                {
+                    edge.Line.Visibility = Visibility.Collapsed;
+                    continue;
+                }
+                edge.Line.Visibility = Visibility.Visible;
 
                 double idle = (now - edge.LastSeen).TotalSeconds;
                 double opacity = idle <= EdgeFullSeconds
@@ -1312,13 +1409,16 @@ namespace WinEtherCloneApe
             }
         }
 
-        private static void PlaceRing(List<NetworkNode> ring, Point center, double radius, double startAngle)
+        /// <summary>Spreads nodes evenly on a circle. Nodes whose IP is in skip keep their slot but are not moved.</summary>
+        private static void PlaceRing(List<NetworkNode> ring, Point center, double radius, double startAngle,
+            HashSet<string>? skip = null)
         {
             for (int i = 0; i < ring.Count; i++)
             {
+                var node = ring[i];
+                if (skip != null && skip.Contains(node.IP)) continue;
                 double angle = startAngle + 2 * Math.PI * i / ring.Count;
                 var target = new Point(center.X + radius * Math.Cos(angle), center.Y + radius * Math.Sin(angle));
-                var node = ring[i];
 
                 if (!node.HasPosition)
                 {
@@ -1337,6 +1437,19 @@ namespace WinEtherCloneApe
 
         private void RenderNode(NetworkNode node, DateTime now, Point center, double pulse)
         {
+            bool shown = IsShown(node);
+            var visibility = shown ? Visibility.Visible : Visibility.Collapsed;
+            if (node.Shape.Visibility != visibility)
+            {
+                node.Shape.Visibility = visibility;
+                node.Label.Visibility = visibility;
+            }
+            if (!shown)
+            {
+                node.Halo.Visibility = Visibility.Collapsed;
+                return;
+            }
+
             double idle = (now - node.LastSeen).TotalSeconds;
             double removeAt = node.Threat != null ? ThreatNodeRemoveSeconds : NodeRemoveSeconds;
             double opacity = idle <= NodeFadeStartSeconds
@@ -1433,8 +1546,10 @@ namespace WinEtherCloneApe
 
         private void RemoveExpired(DateTime now)
         {
+            // The isolated host stays while it is isolated, even when it goes quiet
             var deadNodes = nodes.Values
-                .Where(n => (now - n.LastSeen).TotalSeconds > (n.Threat != null ? ThreatNodeRemoveSeconds : NodeRemoveSeconds))
+                .Where(n => n.IP != isolatedIp
+                            && (now - n.LastSeen).TotalSeconds > (n.Threat != null ? ThreatNodeRemoveSeconds : NodeRemoveSeconds))
                 .ToList();
             foreach (var node in deadNodes)
             {
@@ -1572,7 +1687,24 @@ namespace WinEtherCloneApe
                 node.HostName ?? node.IP, MessageBoxButton.OK, MessageBoxImage.Information);
             menu.Items.Add(detailsItem);
 
-            var zenmap = new MenuItem { Header = "Interrogate with Zenmap", IsEnabled = !node.IsBroadcast };
+            if (isolatedIp != node.IP)
+            {
+                var isolate = new MenuItem
+                {
+                    Header = "Isolate (show only this host's connections)",
+                    ToolTip = "Centers this host and hides everything it is not talking to. Capture continues for all hosts."
+                };
+                isolate.Click += (_, _) => Isolate(node);
+                menu.Items.Add(isolate);
+            }
+            if (isolatedIp != null)
+            {
+                var showAll = new MenuItem { Header = "Show all hosts" };
+                showAll.Click += (_, _) => EndIsolation();
+                menu.Items.Add(showAll);
+            }
+
+            var zenmap =new MenuItem { Header = "Interrogate with Zenmap", IsEnabled = !node.IsBroadcast };
             foreach (string profile in ExternalTools.ZenmapProfiles)
             {
                 var item = new MenuItem { Header = profile };
@@ -1894,6 +2026,7 @@ namespace WinEtherCloneApe
 
         private void ClearVisualization(object sender, RoutedEventArgs e)
         {
+            EndIsolation();
             while (packetQueue.TryDequeue(out _)) Interlocked.Decrement(ref queuedPackets);
             foreach (var node in nodes.Values) RemoveVisuals(node);
             foreach (var edge in edges.Values) networkCanvas.Children.Remove(edge.Line);

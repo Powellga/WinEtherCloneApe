@@ -10,6 +10,7 @@ namespace WinEtherCloneApe
         ///   --open-map           with --demo, open the world map after 20 seconds
         ///   --capture-host <ip>  start capturing on the last-used adapter and open a packet capture for that address
         ///   --zoom <factor>      start zoomed in (for example 3), centered on the view
+        ///   --isolate <ip|busiest> isolate a host after 15 seconds (testing the Isolate view)
         ///   --replay-pcap <file> feed a .pcap file through the same reader used for capture from the router (testing)
         /// </summary>
         [STAThread]
@@ -26,13 +27,17 @@ namespace WinEtherCloneApe
             int replayIndex = Array.IndexOf(args, "--replay-pcap");
             string? replayPcap = replayIndex >= 0 && replayIndex + 1 < args.Length ? args[replayIndex + 1] : null;
 
+            int isolateIndex = Array.IndexOf(args, "--isolate");
+            string? isolate = isolateIndex >= 0 && isolateIndex + 1 < args.Length ? args[isolateIndex + 1] : null;
+
             var app = new App();
             var window = new MainWindow(
                 demoMode: args.Contains("--demo"),
                 demoOpenMap: args.Contains("--open-map"),
                 captureHost: captureHost,
                 startZoom: startZoom,
-                replayPcap: replayPcap);
+                replayPcap: replayPcap,
+                isolate: isolate);
             return app.Run(window);
         }
     }

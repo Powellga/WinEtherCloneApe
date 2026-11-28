@@ -9,6 +9,10 @@
 
 ![WinEtherCloneApe Screenshot](screenshot.png)
 
+## What's new in 2.5
+
+- **Isolate a host** - right-click any host and choose **Isolate** to put it in the center with only the hosts it is talking to around it. New connections appear as they happen. Everything else is still captured, tracked and threat-checked in the background, just hidden. Press **Show All Hosts** (or Esc, or right-click and choose **Show all hosts**) to go back. You can isolate a neighbor straight from the isolated view.
+
 ## What's new in 2.4
 
 - **Watch your whole network from the router** - choose **Router over SSH** in the Network Interface list to see every device's traffic, not just this PC's. The app logs in to your UniFi gateway (UDM, UDM SE, UDM Pro, UCG, UXG) or any Linux router that has tcpdump, and streams the router's packets here over SSH. Nothing is installed on the router. Every feature works on this traffic: the map, threat checks for every phone, TV and smart device, the threat report and per-host packet capture. See [Capture from your router](#capture-from-your-router).
@@ -182,7 +186,7 @@ dotnet bin/Release/net8.0-windows/WinEtherCloneApe.dll --demo
 
 Add `--open-map` to have the World Map open after 20 seconds.
 
-`--capture-host <ip>` starts capturing on the last-used adapter and opens a packet capture for that address straight away. `--zoom <factor>` starts zoomed in (for example `--zoom 2.5`). `--replay-pcap <file>` feeds a `.pcap` file through the same reader used for capture from a router.
+`--capture-host <ip>` starts capturing on the last-used adapter and opens a packet capture for that address straight away. `--zoom <factor>` starts zoomed in (for example `--zoom 2.5`). `--replay-pcap <file>` feeds a `.pcap` file through the same reader used for capture from a router. `--isolate <ip|busiest>` isolates a host 15 seconds after start.
 
 ### NuGet packages
 - SharpPcap 6.3.1 - packet capture
